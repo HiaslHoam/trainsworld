@@ -107,6 +107,8 @@ import { hasWasmSimd } from "./map/wasmSimd";
 import { outOfMemoryText } from "./game/loadText";
 import { startSaveSafety } from "./game/saveSafety";
 import { choiceFromUrl, showStartMenu, START_LOGO, worldCover } from "./ui/StartMenu";
+import { CoopPanel } from "./ui/CoopPanel";
+import { startCoop, watchCoopClock } from "./game/coop";
 import { viewStart } from "./ui/locate";
 import { enterGame, fitAhead, startOpenFit } from "./ui/locate";
 import { realmsAhead } from "./game/realms";
@@ -195,6 +197,12 @@ render(h(DemandStopped, { save: () => client.saveBeforeReload() }), demandStoppe
 const newVersionRoot = document.createElement("div");
 map.getContainer().appendChild(newVersionRoot);
 render(h(NewVersion, { save: () => client.saveBeforeReload() }), newVersionRoot);
+// co-op between two tabs (game/coop.ts): its panel at the bottom, and the role kept over the page's reloads
+const coopRoot = document.createElement("div");
+document.body.appendChild(coopRoot);
+render(h(CoopPanel, null), coopRoot);
+startCoop();
+watchCoopClock();
 // T-3314: the clock worker or the demand pool has gone quiet for minutes: a notice with Reload
 const figuresStoppedRoot = document.createElement("div");
 map.getContainer().appendChild(figuresStoppedRoot);

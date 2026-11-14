@@ -12,6 +12,7 @@ import { moneyState } from "../game/money";
 import type { BubbleScheme } from "../game/palette";
 import { DETAIL_RANGE } from "../map/demandOverlay";
 import { makeSandbox, saveGuide } from "../workers/clockClient";
+import { coopRole } from "../game/coop";
 import { mobileDevice } from "../workers/deviceMemory";
 import { Check, Icon, Segmented, ShapePicker, Stepper } from "./widgets";
 import { SHAPE_MODES } from "../game/lineShape";
@@ -279,7 +280,8 @@ function GameMode() {
       <SideRow />
       <div class="game-mode">
         <span data-tip={sandbox ? t("settingsTab.sandboxTip") : undefined}>{sandbox ? t("settingsTab.sandbox") : t("settingsTab.normal")}</span>
-        {!sandbox && <button class="btn text" data-mode-switch onClick={() => (ask.value = {
+        {!sandbox && coopRole.value === "guest" && <span class="muted small">{t("coop.hostOnlyShort")}</span>}
+        {!sandbox && coopRole.value !== "guest" && <button class="btn text" data-mode-switch onClick={() => (ask.value = {
           text: t("settingsTab.sandboxQuestion"),
           yes: t("settingsTab.sandboxSwitch"), no: t("settingsTab.sandboxStay"), run: makeSandbox,
         })}>{t("settingsTab.sandboxSwitch")}</button>}

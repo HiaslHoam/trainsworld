@@ -7,7 +7,7 @@ import { useState } from "preact/hooks";
 import { ask, selection, tool } from "../game/ui";
 import { flipSites, rightHand, stationsById, world } from "../game/world";
 import type { Selection, WorldView } from "../game/types";
-import { flipSide } from "../workers/clockClient";
+import { coopHostOnly, flipSide } from "../workers/clockClient";
 import { locateLine, locateNodes } from "./locate";
 import { Modal } from "./Modal";
 import { Chip, Segmented } from "./widgets";
@@ -43,7 +43,7 @@ export function SideRow() {
     if (sites.length) setOpen(true);
   };
   const pick = (to: boolean) => {
-    if (to === right) return;
+    if (to === right || coopHostOnly()) return;
     if (!w || !w.edges.length) { void flip(); return; }
     ask.value = { text: t("sideSwitch.ask", { side: to ? "right" : "left" }), yes: t("sideSwitch.switch"), no: t("sideSwitch.keep"), run: () => void flip() };
   };

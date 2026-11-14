@@ -375,6 +375,15 @@ export async function openView(bytes: Uint8Array, name: string): Promise<string 
   location.replace(pageWith({ load: "file" }));
   return "";
 }
+/** Co-op (game/coop.ts): open save bytes in place of the game in hand, as a new slot (the host) or held in no
+ * slot (`view`, a guest). The page reloads into it; false if it could not be stored for the reload. */
+export async function coopLoad(bytes: Uint8Array, name: string, view: boolean): Promise<boolean> {
+  const pending: PendingLoad = { kind: "import", bytes, name, from: saveSlotsState.peek().active, ...(view ? { view: true } : {}) };
+  if (current?.running) { switchNow({ load: "file" }, pending); return true; }
+  if (!await writePending(pending)) return false;
+  location.replace(pageWith({ load: "file" }));
+  return true;
+}
 /** T-3257: before a viewed network (never saved) gives way to another game or the start menu, the player is asked;
  * true to go on. True at once for any other game. */
 export function leaveViewed(): Promise<boolean> {
@@ -473,9 +482,24 @@ async function ifItFits(src: { bytes: Uint8Array } | { key: string }, then?: () 
   else then?.();
   return !why;
 }
+/** Co-op (game/coop.ts): changes to the whole game that are not edits (its mode, its running side) are the host's
+ * alone; after one, the host sends the game to its guests again, since the side switch rebuilds the network. */
+let coopGame: { guest: () => boolean; changed: () => void } | null = null;
+export function setCoopGameHooks(h: typeof coopGame) {
+  coopGame = h;
+}
+/** True, after saying so, when this tab is a co-op guest and may not change the game as a whole. */
+export function coopHostOnly(): boolean {
+  if (!coopGame?.guest()) return false;
+  say(t("coop.hostOnly"), true);
+  return true;
+}
+
 /** T-728: make the game a sandbox, for good. */
 export function makeSandbox() {
-  current?.post({ kind: "sandbox" });
+  if (!current || coopHostOnly()) return;
+  current.post({ kind: "sandbox" });
+  coopGame?.changed();
 }
 /** T-1822: keep the Getting started card's progress in the save. */
 export function saveGuide(guide: GuideSave) {
@@ -497,8 +521,11 @@ export function queryClock(q: Extract<ToClock, { kind: "query" }>["q"]): Promise
 }
 
 /** T-3297: every train, tram and bus to the other side; the sites the flip fixed and left (`ToClock` "flipSide"). */
-export function flipSide(): Promise<Float64Array | null> {
-  return current ? current.flipSide() : Promise.resolve(null);
+export async function flipSide(): Promise<Float64Array | null> {
+  if (!current || coopHostOnly()) return null;
+  const out = await current.flipSide();
+  coopGame?.changed();
+  return out;
 }
 
 /** Which game the page opens (T-677). */

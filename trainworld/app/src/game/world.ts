@@ -75,6 +75,19 @@ export function setAfterEdit(f: (op: EditOp, a: EditAnswer) => void) {
   afterEdit = f;
 }
 
+/** Co-op (game/coop.ts): a guest's edits go to the host instead of its own worker (`route`), and the host is told of
+ * every edit its worker accepted (`applied`), to pass on to its guests. */
+let coopRoute: ((op: EditOp) => Promise<EditAnswer>) | null = null;
+let coopApplied: ((op: EditOp) => void) | null = null;
+export function setCoopHooks(route: typeof coopRoute, applied: typeof coopApplied) {
+  coopRoute = route;
+  coopApplied = applied;
+}
+/** Co-op: an edit replayed from the host, straight to this tab's worker (no sound, no notice, not passed on). */
+export function applyRemoteEdit(op: EditOp): Promise<EditAnswer> {
+  return sink ? sink(op, false) : Promise.resolve({ ok: false, issues: [], charge: 0 });
+}
+
 /** Send an edit; a refusal is explained in `notice`. Resolves with the answer either way. `silent`:
  * its sound was played already (the click that sent it, or the one sound of a run of edits). */
 export async function edit(op: EditOp, quiet = false, silent = false, early: boolean | "rows" = false): Promise<EditAnswer> {
@@ -85,7 +98,8 @@ export async function edit(op: EditOp, quiet = false, silent = false, early: boo
   if (op.op !== "fares" && op.op !== "undo" && op.op !== "redo") editsSent.value++;
   // `early` (T-1407): the answer may come before `world` holds the edit (`a.early`); "rows" (T-2766, a stop click):
   // the answer comes with `world` holding the edit, its network a moment later
-  const a = await sink(op, early);
+  const a = coopRoute ? await coopRoute(op) : await sink(op, early);
+  if (a.ok && !coopRoute) coopApplied?.(op);
   if (!a.ok && !quiet && a.issues.length) say(describeIssues(a.issues, buysOf(op), lineVehicle((op as { line?: number }).line)), true);
   else if (a.ok && !silent) afterEdit?.(op, a);
   return a;
