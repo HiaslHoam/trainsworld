@@ -820,6 +820,13 @@ rect.now { fill-opacity: .45; }
 .stops .rev-stop svg { width: 16px; height: 16px; fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
 .stops .stop-more { flex: none; width: 10px; font-size: 12px; text-align: center; color: var(--muted); }
 .stops .n { width: 40px; text-align: right; }
+/* the line's running trains on the stops strip (ui/inspector/LineTrains.tsx): an arrow on each side of the bar, pointing the way it runs */
+.line-trains { position: relative; }
+.line-trains .line-train { position: absolute; width: 10px; height: 15px; margin-top: -7.5px; padding: 0; border: 0; background: none; cursor: pointer; z-index: 4;
+  filter: drop-shadow(0 0 1px #fff) drop-shadow(0 0 1px #fff); }
+.line-trains .line-train::before { content: ""; position: absolute; inset: 0; background: var(--net-ink); clip-path: polygon(0 0, 100% 0, 100% 62%, 50% 100%, 0 62%); }
+.line-trains .line-train.up::before { clip-path: polygon(50% 0, 100% 38%, 100% 100%, 0 100%, 0 38%); }
+.line-trains .line-train:hover::before { background: var(--accent); }
 /* flat junctions and crossings on the route (T-629): between the dot above and the next one */
 .stops .route-mark { position: absolute; left: 4px; top: calc(50% + var(--at) * 100%); width: 12px; height: 12px; margin-top: -6px; z-index: 1; transform: translateX(var(--soft)); }
 .stops .route-mark.junction::before { content: ""; position: absolute; left: 1px; top: 1px; width: 6px; height: 6px; background: #fff; border: 2px solid var(--net-ink); transform: rotate(45deg); }

@@ -41,6 +41,7 @@ import { turnedLine, type TurnRow } from "../../game/turnedLine";
 import { MareyButton } from "./MareyChart";
 import { ScheduleButton } from "./SchedulePanel";
 import { LineProfile } from "./LineProfile";
+import { LineTrains } from "./LineTrains";
 import { LineTopSpeed } from "./LineTopSpeed";
 import type { EditOp } from "../../workers/protocol";
 import { hasUpgrade, UPGRADE } from "../../game/upgrades";
@@ -349,6 +350,11 @@ function PlainStops({ looks, colour, loop, ends, order, onDblClick, children }: 
       {(loop || ends?.[1]) && <li class="loop-end bottom" aria-hidden="true" />}
     </ul>
   );
+}
+
+/** The line's running trains drawn over the stops strip (plain or related lines), where its rows follow the stop order. */
+function LineTrainsIf({ on, l, st, children }: { on: boolean; l: LineInput; st: LineStats; children: ComponentChildren }) {
+  return on ? <LineTrains l={l} st={st}>{children}</LineTrains> : <>{children}</>;
 }
 
 /** The two-pairs switch is hidden for players (v0.3.3, Anita 2026-11-12) unless the address has `?pairs`; a
@@ -965,14 +971,14 @@ function RailLineInspector({ id }: { id: string }) {
         <span class="right muted small">{tr("cityDetails.boardingsToday")}</span>
       </div>
       {related ? (
-        <div class={orderClass + (turned ? " turned-rel" : "")} onDblClick={onListDblClick}>
+        <LineTrainsIf on={!turned && !editingStops} l={l} st={st}><div class={orderClass + (turned ? " turned-rel" : "")} onDblClick={onListDblClick}>
           <RelatedStops l={l} stopS={st.stopS[0]} colour={shown} loop={loopOnce && !turned} flip={flip} rows={turned?.rows}
             lRow={turned ? (k, drawn, marks) => stopRow(turned.rows[k].i, drawn, marks, turned.rows[k]) : stopRow}
             after={editingStops ? (turned ? (k) => afterStop(turned.rows[k].i, turned.rows[k].arc === "start" || turned.rows[k].arc === "mid") : afterStop) : undefined}
             adder={editingStops ? adder : undefined} onAdd={(node) => void stopEdit({ op: "stopPassed", line: l.num, station: node })}
             transfers={(i, drawn) => (turned ? transferLines(l, turned.rows[i].i, drawn, true) : transferLines(l, i, drawn))} />
-        </div>
-      ) : <PlainStops looks={!!looks} colour={shown} loop={loopOnce && !turned} ends={turned ? [turned.tipTop, turned.tipBottom] : undefined} order={orderClass} onDblClick={onListDblClick}>
+        </div></LineTrainsIf>
+      ) : <LineTrainsIf on={!turned && !editingStops} l={l} st={st}><PlainStops looks={!!looks} colour={shown} loop={loopOnce && !turned} ends={turned ? [turned.tipTop, turned.tipBottom] : undefined} order={orderClass} onDblClick={onListDblClick}>
         {turned
           ? turned.rows.map((row) => <>{stopRow(row.i, undefined, undefined, row)}{afterStop(row.i, row.arc === "start" || row.arc === "mid")}</>)
           : flip
@@ -981,7 +987,7 @@ function RailLineInspector({ id }: { id: string }) {
             {stopRow(i)}
             {afterStop(i)}
           </>))}
-      </PlainStops>}
+      </PlainStops></LineTrainsIf>}
     </>
   );
 
