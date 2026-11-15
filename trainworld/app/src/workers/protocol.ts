@@ -238,7 +238,10 @@ export type ToClock =
    * demand is answered before its state is built, so the next ghost is not kept waiting */
   /** `rows` (T-2766, the line tool's stop clicks): the world's rows are posted and the edit answered at once, its
    * network, trips and boarding once no stop click has come for a moment; a stop click before then joins them */
-  | { kind: "edit"; seq: number; op: EditOp; early?: boolean; rows?: boolean }
+  | { kind: "edit"; seq: number; op: EditOp; early?: boolean; rows?: boolean;
+      /** co-op (game/coop.ts): the game time the edit takes effect at and its lead, as the host's worker applied it,
+       * so a guest's departures change at the same moment; the clock's own otherwise */
+      at?: number; lead?: number }
   /** what a route would cost and whether it can be built; answered with "preview" */
   | ({ kind: "preview"; seq: number } & RouteAsk)
   /** what giving blueprint track new PIs would do (T-064); answered with "preview" */
@@ -737,7 +740,9 @@ export type FromClock =
   | { kind: "ready"; initMs: number; frame: FrameSpec }
   /** an edit's answer; `issues` are the track model's problem kinds (`TrackApi.issue_kinds`);
    * `ms`: the worker's time on the edit by step (T-229, for `?debug=1`); `node` after addBuilding: the building's id */
-  | { kind: "edited"; seq: number; ok: boolean; issues: string[]; charge: number; line?: number; node?: number; skipped?: number; ms?: Record<string, number>; early?: boolean; held?: Float32Array[] }
+  | { kind: "edited"; seq: number; ok: boolean; issues: string[]; charge: number; line?: number; node?: number; skipped?: number; ms?: Record<string, number>; early?: boolean; held?: Float32Array[];
+      /** the game time the edit took effect at and its lead (co-op passes them on) */
+      at?: number; lead?: number }
   | {
       kind: "preview";
       seq: number;

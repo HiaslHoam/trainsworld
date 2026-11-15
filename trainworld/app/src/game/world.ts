@@ -28,9 +28,11 @@ export const flipSites = signal<{ right: boolean; sites: { kind: number; id: num
 /** A short message for the player: why an edit was refused, what a construct cost. */
 export const notice = signal<{ text: string; bad: boolean; at: number } | null>(null);
 
-let sink: ((op: EditOp, early?: boolean | "rows") => Promise<EditAnswer>) | null = null;
+/** `time`: co-op, the game time and lead the host's edit took effect at (a guest's replay of it). */
+type Sink = (op: EditOp, early?: boolean | "rows", time?: { at: number; lead: number }) => Promise<EditAnswer>;
+let sink: Sink | null = null;
 /** workers/clockClient.ts hands over its edit function. */
-export function setEditSink(f: (op: EditOp, early?: boolean | "rows") => Promise<EditAnswer>) {
+export function setEditSink(f: Sink) {
   sink = f;
 }
 
@@ -78,14 +80,14 @@ export function setAfterEdit(f: (op: EditOp, a: EditAnswer) => void) {
 /** Co-op (game/coop.ts): a guest's edits go to the host instead of its own worker (`route`), and the host is told of
  * every edit its worker accepted (`applied`), to pass on to its guests. */
 let coopRoute: ((op: EditOp) => Promise<EditAnswer>) | null = null;
-let coopApplied: ((op: EditOp) => void) | null = null;
+let coopApplied: ((op: EditOp, a: EditAnswer) => void) | null = null;
 export function setCoopHooks(route: typeof coopRoute, applied: typeof coopApplied) {
   coopRoute = route;
   coopApplied = applied;
 }
 /** Co-op: an edit replayed from the host, straight to this tab's worker (no sound, no notice, not passed on). */
-export function applyRemoteEdit(op: EditOp): Promise<EditAnswer> {
-  return sink ? sink(op, false) : Promise.resolve({ ok: false, issues: [], charge: 0 });
+export function applyRemoteEdit(op: EditOp, time?: { at: number; lead: number }): Promise<EditAnswer> {
+  return sink ? sink(op, false, time) : Promise.resolve({ ok: false, issues: [], charge: 0 });
 }
 
 /** Send an edit; a refusal is explained in `notice`. Resolves with the answer either way. `silent`:
@@ -99,7 +101,7 @@ export async function edit(op: EditOp, quiet = false, silent = false, early: boo
   // `early` (T-1407): the answer may come before `world` holds the edit (`a.early`); "rows" (T-2766, a stop click):
   // the answer comes with `world` holding the edit, its network a moment later
   const a = coopRoute ? await coopRoute(op) : await sink(op, early);
-  if (a.ok && !coopRoute) coopApplied?.(op);
+  if (a.ok && !coopRoute) coopApplied?.(op, a);
   if (!a.ok && !quiet && a.issues.length) say(describeIssues(a.issues, buysOf(op), lineVehicle((op as { line?: number }).line)), true);
   else if (a.ok && !silent) afterEdit?.(op, a);
   return a;

@@ -3669,9 +3669,12 @@ function newLineShape(op: EditOp, line: number) {
   send({ kind: "lineShapes", shapes: Object.fromEntries(lineShapes) });
 }
 
+/** Co-op: the game time the edit being applied takes effect at, when the message gave one. */
+let editNow: number | null = null;
+
 function apply(op: EditOp): Applied {
   const a = api!;
-  a.set_game_day(Math.floor(gameNow() / 86400)); // T-2871: what this edit constructs is dated today
+  a.set_game_day(Math.floor((editNow ?? gameNow()) / 86400)); // T-2871: what this edit constructs is dated today
   switch (op.op) {
     case "route": {
       const r = a.add_route(...routeArgs(a, op));
@@ -4401,11 +4404,14 @@ async function handle(msg: ToClock) {
     const bpRemove = msg.op.op === "removeEdge" && posted.edges.get(msg.op.edge)?.built === false;
     // T-1071: a train count takes effect a moment ahead, once its trips are on screen
     const service = msg.op.op === "setTrainCount" || msg.op.op === "setHeadway";
-    if (service) {
-      api.set_now(gameNow());
-      api.set_edit_lead(clk.rate * serviceLeadS());
-    }
-    const { r, fault, line, node, skipped, charge: charged, trainCharge, why } = apply(msg.op);
+    // co-op: a guest applies the host's edit at the host's time and lead, so both change departures at one moment
+    const effectAt = msg.at ?? gameNow(), lead = msg.lead ?? (service ? clk.rate * serviceLeadS() : 0);
+    api.set_now(effectAt);
+    if (lead) api.set_edit_lead(lead);
+    editNow = effectAt;
+    let applied: Applied;
+    try { applied = apply(msg.op); } finally { editNow = null; }
+    const { r, fault, line, node, skipped, charge: charged, trainCharge, why } = applied;
     api.set_edit_lead(0); // a refused edit leaves it set
     if (import.meta.env.DEV && panicAfterEdit) { panicAfterEdit = false; panicNow(); }
     const tB = performance.now();
@@ -4413,7 +4419,7 @@ async function handle(msg: ToClock) {
     // an op of two edits (T-1899) says what both charged
     const charge = r === 0 ? charged ?? api.last_charge() : 0;
     const op = msg.op, seq = msg.seq;
-    const answer = (early?: boolean, held?: Float32Array[]) => send({ kind: "edited", seq, ok: r === 0, issues: r === 0 ? why ?? [] : r === INSERT_REFUSED ? ["InsertStop"] : r === DROP_REFUSED ? ["DropStop"] : r === ORDER_REFUSED && fault ? [`StopOrder:${fault.join(":")}`] : issues(), charge, line, node, skipped, ms: { apply: tB - tA, ...timing, total: performance.now() - tA }, early, held }); // i18n-ignore
+    const answer = (early?: boolean, held?: Float32Array[]) => send({ kind: "edited", seq, ok: r === 0, issues: r === 0 ? why ?? [] : r === INSERT_REFUSED ? ["InsertStop"] : r === DROP_REFUSED ? ["DropStop"] : r === ORDER_REFUSED && fault ? [`StopOrder:${fault.join(":")}`] : issues(), charge, line, node, skipped, ms: { apply: tB - tA, ...timing, total: performance.now() - tA }, early, held, at: effectAt, lead }); // i18n-ignore
     if (r !== 0) return answer();
     dirty = edited = true; editAt = Date.now();
     if (line !== undefined) newLineShape(op, line);

@@ -7,6 +7,9 @@
 // - A save renumbers ids densely (sim/src/track/save.rs), so the tabs must start from the same bytes: on a join the
 //   host exports its game (`sync`), reloads it from those bytes itself, then tells the guests to load them (`go`).
 //   One epoch per sync; the host keeps the epoch's edits (`log`) so a guest that loads late catches up (`ready`).
+// - An edit that changes departures takes effect at the game time its worker applies it (docs/track-and-service.md,
+//   trains on a running line), so each edit goes out with the host's time and lead and a guest applies it at those,
+//   or its trains would change over at another moment than the host's.
 // - The host's clock is the game's clock (`clock`, every second and on each change); a guest's speed buttons ask
 //   the host (`speed`).
 // - Every game load reloads the page, so each tab keeps its role and epoch in sessionStorage.
@@ -25,14 +28,17 @@ type Role = "host" | "guest";
 type Stored = { role: Role; id: string; epoch: number; /** host: reloaded for a sync, the guests not yet told */ awaitGo?: boolean;
   /** guest: the page is reloading into the host's game (a reload without it holds some other game) */ loading?: boolean };
 
+/** An edit as the host's worker applied it: the op, and the game time and lead it took effect at. */
+type Logged = { op: EditOp; at?: number; lead?: number };
+
 type Msg =
   | { k: "hello"; from: string }
   | { k: "host"; from: string; e: number }
   | { k: "sync"; from: string; e: number; bytes: Uint8Array }
   | { k: "go"; from: string; e: number }
   | { k: "ready"; from: string; e: number; next: number }
-  | { k: "ops"; from: string; to: string; e: number; first: number; ops: EditOp[] }
-  | { k: "op"; from: string; e: number; seq: number; op: EditOp }
+  | { k: "ops"; from: string; to: string; e: number; first: number; ops: Logged[] }
+  | { k: "op"; from: string; e: number; seq: number; edit: Logged }
   | { k: "ask"; from: string; e: number; req: number; op: EditOp }
   | { k: "answer"; from: string; to: string; req: number; a: EditAnswer; seq: number }
   | { k: "clock"; from: string; e: number; t: number; at: number; running: boolean; ticking: boolean; x: number }
@@ -75,17 +81,18 @@ const loaded = () => gamesLoaded.peek() > 0;
 // ---- the host ----
 
 /** The edits of this epoch, in the order the host's worker accepted them. */
-const log: EditOp[] = [];
+const log: Logged[] = [];
 /** each logged edit's number, by the op object the host's worker was sent */
 const seqOf = new WeakMap<EditOp, number>();
 const guests = new Set<string>();
 let syncing = false;
 
-function hostApplied(op: EditOp) {
+function hostApplied(op: EditOp, a: EditAnswer) {
   if (!me || me.role !== "host" || me.awaitGo || me.epoch === 0) return;
-  log.push(op);
+  const edit: Logged = { op, at: a.at, lead: a.lead };
+  log.push(edit);
   seqOf.set(op, log.length - 1);
-  post({ k: "op", from: me.id, e: me.epoch, seq: log.length - 1, op });
+  post({ k: "op", from: me.id, e: me.epoch, seq: log.length - 1, edit });
 }
 
 /** Send the game to the guests: the host reloads from the exported bytes, and the guests load them once it has. */
@@ -145,7 +152,7 @@ async function onHost(m: Msg) {
 
 /** The next edit this tab applies, and the ones that came early. */
 let nextSeq = 0;
-const early = new Map<number, EditOp>();
+const early = new Map<number, Logged>();
 let pumping = false;
 const seqWaiters: { seq: number; done: () => void }[] = [];
 /** The bytes of a sync, kept until the host says go. */
@@ -163,9 +170,9 @@ async function pump() {
   pumping = true;
   try {
     while (early.has(nextSeq)) {
-      const op = early.get(nextSeq)!;
+      const e = early.get(nextSeq)!;
       early.delete(nextSeq);
-      await applyRemoteEdit(op);
+      await applyRemoteEdit(e.op, e.at !== undefined ? { at: e.at, lead: e.lead ?? 0 } : undefined);
       nextSeq++;
       for (let i = seqWaiters.length - 1; i >= 0; i--) if (seqWaiters[i].seq < nextSeq) seqWaiters.splice(i, 1)[0].done();
     }
@@ -213,13 +220,13 @@ async function onGuest(m: Msg) {
       break;
     case "ops":
       if (m.to !== guest.id || m.e !== guest.epoch || !inGame()) break;
-      m.ops.forEach((op, i) => { if (m.first + i >= nextSeq) early.set(m.first + i, op); });
+      m.ops.forEach((edit, i) => { if (m.first + i >= nextSeq) early.set(m.first + i, edit); });
       coopStatus.value = "connected";
       void pump();
       break;
     case "op":
       if (m.e !== guest.epoch || !inGame()) break;
-      if (m.seq >= nextSeq) early.set(m.seq, m.op);
+      if (m.seq >= nextSeq) early.set(m.seq, m.edit);
       void pump();
       break;
     case "answer":
@@ -236,7 +243,8 @@ async function onGuest(m: Msg) {
         if (m.running && m.x * SPEEDS[0] !== clock.chosenRate.peek()) clock.setMultiple(m.x);
         // where the host's clock is now, from when it was sent
         const now = m.t + (m.ticking ? ((Date.now() - m.at) / 1000) * m.x * SPEEDS[0] : 0);
-        if (Math.abs(clock.now() - now) > Math.max(2, m.x * SPEEDS[0] * 0.25)) clock.set(now);
+        // trains are drawn from the clock, so any gap in time is a gap on the map: follow within a game second or 50 ms
+        if (Math.abs(clock.now() - now) > Math.max(1, m.x * SPEEDS[0] * 0.05)) clock.set(now);
         // the shown minute moves with drawn frames, which a tab out of sight has none of
         clock.tick();
       } finally {

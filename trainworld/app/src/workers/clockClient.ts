@@ -106,6 +106,9 @@ export interface EditAnswer {
   /** T-2404: an early answer whose state waits for the pointer's rest: the blueprint edges it made
    * or changed, local x, y, z each, for their stand-ins */
   held?: Float32Array[];
+  /** the game time the edit took effect at and its lead (co-op passes them on to guests) */
+  at?: number;
+  lead?: number;
 }
 
 /** A preview's answer: the worker's "preview" message, but for the sequence number and what only the
@@ -728,7 +731,7 @@ export class ClockClient {
 
   constructor(cityId = HOME_CITY) {
     this.cityId = cityId;
-    setEditSink((op, early) => this.edit(op, early));
+    setEditSink((op, early, time) => this.edit(op, early, time));
     setOpenedSink((zones) => this.post({ kind: "opened", zones }));
     setDemandFineSink((zones, built) => this.post({ kind: "demandFine", zones, built }));
     setHandOrderSink((kind, ids) => this.post({ kind: "listOrder", list: kind === "lines" ? 0 : 1, ids }));
@@ -1276,7 +1279,7 @@ export class ClockClient {
         // (an early answer's world comes with its state, T-1407)
         if (msg.ok && msg.charge > 0 && msg.early) this.earlyShares = { seq: msg.seq, line: msg.line };
         else if (msg.ok && msg.charge > 0 && world.value) this.post({ kind: "chargeShares", seq: msg.seq, ...chargeShares(this.worldBefore, world.value, msg.line) });
-        f?.({ ok: msg.ok, issues: msg.issues, charge: msg.charge, line: msg.line, node: msg.node, skipped: msg.skipped, early: msg.early, held: msg.held });
+        f?.({ ok: msg.ok, issues: msg.issues, charge: msg.charge, line: msg.line, node: msg.node, skipped: msg.skipped, early: msg.early, held: msg.held, at: msg.at, lead: msg.lead });
         break;
       }
       case "preview": {
@@ -1374,8 +1377,13 @@ export class ClockClient {
 
   /** Send an edit; the promise resolves with the worker's answer. `early` "rows": a stop click's (T-2766), answered
    * once the world holds it, its network a moment after the clicks stop. */
-  edit(op: EditOp, early: boolean | "rows" = false): Promise<EditAnswer> {
+  edit(op: EditOp, early: boolean | "rows" = false, time?: { at: number; lead: number }): Promise<EditAnswer> {
     const seq = ++this.seq;
+    if (time) {
+      this.post({ kind: "edit", seq, op, at: time.at, lead: time.lead });
+      this.sent.set(seq, { what: op.op, at: performance.now() });
+      return new Promise((res) => this.pending.set(seq, res));
+    }
     if (early === "rows") {
       this.stopsOut++;
       this.lastStopSent = performance.now();
