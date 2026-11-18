@@ -14,13 +14,13 @@ import { CITIES, cityById, cityWithin, HOME_CITY, NEW_GAME_FRAME, WORLD_ID, zone
 import { blockFile, blocksTouching, indexHas, parseBlockIndex, type BlockIndex } from "../game/terrainBlocks";
 import { frameKindName, frameKindNumber, M_PER_DEG, makeFrame, mercK, type Frame, type FrameSpec } from "../game/frame";
 import { PERIODS } from "../game/periods";
-import { NEW_LINE } from "../game/newLine";
+import { headwaysFor, NEW_LINE } from "../game/newLine";
 import { LOAN_AMOUNTS, loanAllowed, loanBalance, loanDrain, loanFromSave, loanProfit, loanToSave, newLoan, type Loan } from "../game/loan";
 import { startNodes } from "../game/fareDefault";
 import { letterOf } from "../game/lineLetter";
 import { cloneName, cloneSymbol } from "../game/cloneNames";
 import { shapesFrom, type LineShape } from "../game/lineShape";
-import { faresOf, START_FARE, START_NODES, tidyHsr, tidyLineFare, tidyTransfer, type Fares } from "../game/fareCurve";
+import { capTransfer, faresOf, START_FARE, START_NODES, tidyHsr, tidyLineFare, tidyTransfer, type Fares } from "../game/fareCurve";
 import { EVERY, FARE_BASELINE, FARE_E, incomeScale, keepOwn, OLD_FARE_E, oldCurveFactor, oldIncomeScale, runFactorOf, scaleFromOld, START, startFromOld, tidyOwn } from "../game/income";
 import { SHADES } from "../game/shadeTable";
 import { DAY_KINDS, dayKindOf } from "../game/days";
@@ -36,13 +36,14 @@ import { bandEdges, diagramGraph } from "../diagram/graph";
 import { nodeLngLat, regionGroups } from "../diagram/regions";
 import { StrokeSender, strokesOfPieces, type StrokeKind, type StrokeMode } from "../map/strokePost";
 import { readOutlinesForPlaces, type PackedOutlines } from "../map/coarseOutlines";
+import { canvasReadsTrue } from "../map/canvasRead";
 import { buildComplexes, type Complexes } from "../game/complexes";
 import { ComplexBuilder } from "../game/complexBuilder";
 import { buildingMembers, buildingsFrom, withBuildingLinks } from "../game/buildings";
 import { IN_BUILDING, UPGRADE, UPGRADE_BITS } from "../game/upgrades";
 import { saveNetKey } from "./demandCache";
 import { fetchRange } from "./rangeFetch";
-import { newDay, newHour, addEntry, currentZones, decodeSave, encodeSave, isThisWorld, isRetiredTrackFormat, trackFrameKind, readStored, failReads, StorageReadError, SAVE_FORMAT, START_CASH, NEW_LINE_CARS, START_CLOCK, writeStored, listSlots, writeSlot, renameSlot, leaseSlot, ORIGINAL_SLOT, SAVE_DAMAGED, isDamagedError, unreadableKey, setNetworkCheck, markDamaged, rescueGood, listBackups, writeBackup, backupSlot, BACKUP_STEPS, headerUnread, nextGameName, newGameName, slotName, takePending, writePending, readSync, writeSync, sweepDeleted, makeRoom, lastSync, WHOLE_PANEL, type PendingLoad, type GameMode, type NewGameSpec, type SlotBackup, type SlotLease, type SlotSummary, type StoredSave, type DayLedger, type HourLedger, type SaveHeader, type NewHeadways, cleanNewHeadways, type GuideSave, type Achieved } from "./saveFile";
+import { newDay, newHour, addEntry, currentZones, decodeSave, encodeSave, isThisWorld, isRetiredTrackFormat, trackFrameKind, readStored, failReads, StorageReadError, SAVE_FORMAT, START_CASH, NEW_LINE_CARS, START_CLOCK, writeStored, listSlots, writeSlot, SlotTakenError, renameSlot, leaseSlot, ORIGINAL_SLOT, SAVE_DAMAGED, isDamagedError, unreadableKey, setNetworkCheck, markDamaged, rescueGood, listBackups, writeBackup, backupSlot, BACKUP_STEPS, headerUnread, nextGameName, newGameName, slotName, takePending, writePending, readSync, writeSync, sweepDeleted, makeRoom, lastSync, WHOLE_PANEL, type PendingLoad, type GameMode, type NewGameSpec, type SlotBackup, type SlotLease, type SlotSummary, type StoredSave, type DayLedger, type HourLedger, type SaveHeader, type NewHeadways, cleanNewHeadways, type GuideSave, type Achieved } from "./saveFile";
 import { StateRows, upgradesOf, type RowEnv } from "./stateRows";
 import { PlatformLines } from "./platformLines";
 import { lineProfile } from "./lineProfile";
@@ -93,7 +94,7 @@ function loadFares(f: SaveHeader["fares"] | undefined): Fares {
   // T-2559: an old save's base and rate are taken from its rounded nodes (what the slot writes next), so the first reload's network is the later ones'
   const curve = faresOf(g, START_FARES);
   const fare = old || !f.nodes ? faresOf({ nodes: curve.nodes }, START_FARES) : curve;
-  return { ...fare, scales, baseline: FARE_BASELINE, basis: "usd", income: FARE_E, ...hsr, ...ferry, ...bus, ...(transfer > 0 ? { transfer } : {}), ...ref, ...lines };
+  return capTransfer({ ...fare, scales, baseline: FARE_BASELINE, basis: "usd", income: FARE_E, ...hsr, ...ferry, ...bus, ...(transfer > 0 ? { transfer } : {}), ...ref, ...lines });
 }
 /** T-3567: line `line`'s own fare multiple set to `mul` (1 clears it), its quad-track twin's with it; false for
  * no such line. */
@@ -356,6 +357,14 @@ let guideWanted = false;
 let home: string | undefined;
 /** T-3115: the Community share this game is a copy of (`SaveHeader.copy`); undefined: the player's own */
 let copyOf: string | undefined;
+/** T-3707: why this page's games are modded (the "modded" message), and the game in hand's reasons (`SaveHeader.modded`):
+ * its own and the page's, never fewer; undefined for the published game's own */
+let pageModded: string[] = [];
+let modded: string[] | undefined;
+function withModded(own: unknown): string[] | undefined {
+  const all = [...new Set([...(Array.isArray(own) ? own.filter((x): x is string => typeof x === "string") : []), ...pageModded])].slice(0, 16);
+  return all.length ? all : undefined;
+}
 /** T-531: paid edits' charges, held under "" until the main thread says how each divides */
 const heldCharges = new Map<number, { day: number; hour: number; build: number; trains: number }>();
 /** Wall ms on the clock both threads read (`ToClock` "clock"): Date.now() drifts from it, and the
@@ -578,7 +587,8 @@ async function intoNewSlot(name: string, load: () => Promise<unknown> | void, wr
   dirty = writeNow;
   savedAt = Date.now();
   if (newer && newerFile) await keepAsLoaded(key);
-  else if (!writeNow || !await autosave()) await publishSlots();
+  // T-3687: an empty game is not written (autosave), and the page must still hear which slot it is in
+  else if (!writeNow || !await autosave() || unwritten === key) await publishSlots();
   slotChanges?.postMessage({ key });
 }
 
@@ -1062,11 +1072,27 @@ const TRACK_MARGIN_M = 2_000;
 const VIEW_MARGIN_M = 20_000;
 const VIEW_SPAN_M = 400_000;
 
+/** masks fetched at once at most: a game over a continent meets hundreds of zones, and that many fetches at once fail
+ * in the browser (ERR_INSUFFICIENT_RESOURCES, T-3463, as the diagram's masks did in T-3448) */
+const WATER_FETCHES = 32;
+let waterBusy = 0;
+const waterQueue: (() => void)[] = [];
+async function inWaterSlot<T>(run: () => Promise<T>): Promise<T> {
+  if (waterBusy >= WATER_FETCHES) await new Promise<void>((r) => waterQueue.push(r)); // a finished fetch hands its slot over
+  else waterBusy++;
+  try {
+    return await run();
+  } finally {
+    const next = waterQueue.shift();
+    if (next) next(); else waterBusy--;
+  }
+}
+
 function fetchWater(id: string): Promise<WaterRaster | null> {
   let p = waterFetches.get(id);
   if (!p) {
     const url = new URL(id, packBase).href;
-    p = (async () => {
+    const once = async (): Promise<WaterRaster | null> => {
       const res = await fetch(url + ".json", { signal: AbortSignal.timeout(GROUND_TIMEOUT_MS) });
       if (res.status === 404) return null;
       const head = await res.json();
@@ -1081,7 +1107,9 @@ function fetchWater(id: string): Promise<WaterRaster | null> {
         rows: new Uint32Array(buf, row.offset - base, row.count), runs: new Uint16Array(buf, xs.offset - base, xs.count),
         lon: head.origin.lon, lat: head.origin.lat,
       };
-    })();
+    };
+    // one more try a second later, in the same slot
+    p = inWaterSlot(() => once().catch(() => new Promise<void>((r) => setTimeout(r, 1000)).then(once)));
     waterFetches.set(id, p);
     watchGround("w:" + id, p);
     // a failed fetch is tried again by the next edit or view that needs it, or by `retryGround`
@@ -1723,14 +1751,16 @@ async function masksBeforeLoad(net: Uint8Array) {
   await ensureMasks(missing);
 }
 
-/** Put a network (in the world frame) in the track model, with the masks of the zones it meets. */
-async function openNetwork(net: Uint8Array) {
+/** Put a network (in the world frame) in the track model, with the masks of the zones it meets. `level`: the
+ * save level a player's game was written at (T-3647, `TrackApi.set_load_level`), absent for this build's. */
+async function openNetwork(net: Uint8Array, level?: number) {
   await worldWaterIntoModel();
   // T-3478: a stalled index holds the open no longer than its blocks may; the blocks follow when it lands
   await Promise.race([terrainIndexIntoModel(), new Promise((r) => setTimeout(r, LOAD_TERRAIN_WAIT_MS))]);
   await masksBeforeLoad(net);
+  if (level !== undefined) api!.set_load_level(level);
   if (!api!.load(net)) throw new Error(SAVE_DAMAGED);
-  await masksForLoaded(net);
+  await masksForLoaded(net, level);
   await terrainForLoaded();
   // T-1929: the roads under the blueprint, so its quote has them before Construct waits for them
   void roadsUnder(...blueprintPolylines());
@@ -1738,7 +1768,7 @@ async function openNetwork(net: Uint8Array) {
 
 /** After a network is loaded: the masks of every zone its track meets, then the network opened again
  * over them if any was missing (each mask installed on a loaded network would rework all of it). */
-async function masksForLoaded(net: Uint8Array) {
+async function masksForLoaded(net: Uint8Array, level?: number) {
   const a = api!;
   syncFrame();
   const xy: number[] = [];
@@ -1761,6 +1791,7 @@ async function masksForLoaded(net: Uint8Array) {
   if (!missing.length) return;
   a.load(emptyTrack!);
   await ensureMasks(missing);
+  if (level !== undefined) a.set_load_level(level);
   if (!a.load(net)) throw new Error(SAVE_DAMAGED);
 }
 
@@ -2263,6 +2294,8 @@ function moneyState(): MoneyState {
     dayShift,
     mode,
     ...(copyOf ? { copy: true } : {}),
+    ...(modded ? { modded: true } : {}),
+    slot: loadingInto ?? activeSlot,
     fleet: a.fleet(),
     carsNeeded: a.cars_needed(),
     fleetFast: a.fleet_fast(),
@@ -2565,7 +2598,7 @@ function shapeHour(epoch: number, b: Float32Array) {
 // ---------------------------------------------------------------- saves (T-029)
 
 function header(): SaveHeader {
-  return { game: "anitabuilder", format: SAVE_FORMAT, level: TrackApi.save_level(), city, region: WORLD_ID, cities: CITIES.map(c => c.id), clock: gameNow(), cash: api!.cash(), ...loanToSave(loan), fleet: api!.fleet(), fleetFast: api!.fleet_fast(), ...(api!.fleet_bus() ? { fleetBus: api!.fleet_bus() } : {}), ...(api!.fleet_ferry() ? { fleetFerry: api!.fleet_ferry() } : {}), ...(api!.fleet_tram() ? { fleetTram: api!.fleet_tram() } : {}), fares: { ...fares }, ledger: ledger.map(rounded), hours: hourLedger.map(rounded), regions: savedRegions(rounded), ...(lineDays.size ? { lineDays: savedLineDays(true) } : {}), stars: Object.fromEntries(stars), goals: Object.fromEntries(goals), notes: Object.fromEntries(lineNotes), ...savedShapes(), ...savedHidden(), mode, start: startZone, ...(dayPinned ? { dayShift } : {}), opened: opened && [...opened], ...(demandFine ? { demandFine } : {}), ...(demandBuilt?.length ? { demandBuilt } : {}), newCars: newLineCars, ...(Object.keys(newLineHeadway).length ? { newHeadway: newLineHeadway } : {}), ...(newLineWeekendShare !== null ? { newWeekendShare: newLineWeekendShare } : {}), ...(guide ? { guide } : {}), ...(achievements ? { achievements: Object.fromEntries(achievements) } : {}), ...(home ? { home } : {}), ...(copyOf ? { copy: copyOf } : {}) };
+  return { game: "anitabuilder", format: SAVE_FORMAT, level: TrackApi.save_level(), city, region: WORLD_ID, cities: CITIES.map(c => c.id), clock: gameNow(), cash: api!.cash(), ...loanToSave(loan), fleet: api!.fleet(), fleetFast: api!.fleet_fast(), ...(api!.fleet_bus() ? { fleetBus: api!.fleet_bus() } : {}), ...(api!.fleet_ferry() ? { fleetFerry: api!.fleet_ferry() } : {}), ...(api!.fleet_tram() ? { fleetTram: api!.fleet_tram() } : {}), fares: { ...fares }, ledger: ledger.map(rounded), hours: hourLedger.map(rounded), regions: savedRegions(rounded), ...(lineDays.size ? { lineDays: savedLineDays(true) } : {}), stars: Object.fromEntries(stars), goals: Object.fromEntries(goals), notes: Object.fromEntries(lineNotes), ...savedShapes(), ...savedHidden(), mode, start: startZone, ...(dayPinned ? { dayShift } : {}), opened: opened && [...opened], ...(demandFine ? { demandFine } : {}), ...(demandBuilt?.length ? { demandBuilt } : {}), newCars: newLineCars, ...(Object.keys(newLineHeadway).length ? { newHeadway: newLineHeadway } : {}), ...(newLineWeekendShare !== null ? { newWeekendShare: newLineWeekendShare } : {}), ...(guide ? { guide } : {}), ...(achievements ? { achievements: Object.fromEntries(achievements) } : {}), ...(home ? { home } : {}), ...(copyOf ? { copy: copyOf } : {}), ...(modded ? { modded } : {}) };
 }
 
 /** The game as file bytes. The network and header are taken at once, before anything awaits. */
@@ -2610,7 +2643,8 @@ async function slotSummary(): Promise<SlotSummary> {
   const li = a.lines_info();
   const summary: SlotSummary = { cities, lines: li.length / 22, stations, cash: a.cash(), mode, ...(copyOf ? { copy: true } : {}) };
   try {
-    if (typeof OffscreenCanvas === "undefined") return summary;
+    // T-3705: a browser that makes up a canvas's pixels gets no picture rather than a made-up one
+    if (typeof OffscreenCanvas === "undefined" || !canvasReadsTrue()) return summary;
     // track (grey) and each line's route (its colour), in local units: what the renderer draws
     const track: ArrayLike<number>[] = [];
     const ei = a.edges_info();
@@ -2717,6 +2751,7 @@ function autosave(): Promise<boolean> {
     return Promise.resolve(true);
   }
   const key = activeSlot; // an in-flight write must never move to the next slot
+  const lease = activeLease;
   const force = byHandNext;
   const wasEdited = edited;
   byHandNext = false;
@@ -2735,7 +2770,10 @@ function autosave(): Promise<boolean> {
       const lastName = activeName?.key === key ? activeName.name : undefined;
       // T-1829: a failed write tries once more, on a connection opened again and, when the browser
       // is out of room, with the demand caches dropped
-      const fresh = await writeSlot(key, record, lastName).catch(async (err) => { if (!await makeRoom(err)) throw err; return writeSlot(key, record, lastName); });
+      // T-3611: the lease may have been taken while the save was built, and the message saying so may not have
+      // arrived: the write itself refuses a slot another tab saved since this one read it
+      const write = () => { if (activeLease !== lease) throw new SlotTakenError(); return writeSlot(key, record, lastName, seenEdit); };
+      const fresh = await write().catch(async (err) => { if (err instanceof SlotTakenError || !await makeRoom(err)) throw err; return write(); });
       // T-1829: a slot this game had written found gone (the browser's storage cleared under it):
       // the game is written again above, and its tie to the account put back
       const first = fresh && unwritten === key;
@@ -2755,6 +2793,12 @@ function autosave(): Promise<boolean> {
     } catch (err) {
       dirty = true;
       edited ||= wasEdited;
+      if (err instanceof SlotTakenError) {
+        // another tab holds the slot now: autosave stays off here until a save by hand takes it back
+        if (activeLease === lease) { activeLease = null; leaseTaken = true; }
+        await publishSlots();
+        return false;
+      }
       if (isPanic(err)) { panicLater(err, "autosave"); return false; } // not the browser's fault, and rebuilt then saved
       savedAt = Date.now(); // retry on the next autosave interval, rather than every tick
       saveFailure = "clockWorker.browserCouldNotSave";
@@ -2771,6 +2815,7 @@ function autosave(): Promise<boolean> {
 async function keepOtherTabs(key: string) {
   const [stored, rec] = await Promise.all([readStored(key), readSync(key)]);
   if (!stored || editOf(stored) <= seenEdit) return;
+  seenEdit = editOf(stored); // read here now: this tab's next save is meant to replace it
   const to = "slot-" + crypto.randomUUID();
   const lease = await leaseSlot(to);
   try {
@@ -2842,6 +2887,7 @@ async function manageSlot(msg: Extract<ToClock, { kind: "saveSlot" }>) {
         newerFile = null;
         dirty = true;
         savedAt = Date.now();
+        sendMoney(); // T-3687: the money names the slot it is played in
       } catch (err) { lease.release(); throw err; }
     } else if (msg.action === "open") {
       const key = msg.key;
@@ -2931,7 +2977,8 @@ async function loadGame(bytes: Uint8Array, from: "autosave" | "file" | "new", fr
   // T-1539: the demand result kept for this save's network can show while the network is worked out
   // (China's 17-42 s); awaited here, since the load below holds the worker
   if (st.length > 3) await saveNetKey(net, h).then((key) => send({ kind: "netAhead", key }), () => {});
-  await openNetwork(net);
+  // T-3647: a player's game saved before 0.4 keeps the way its single track ran then
+  await openNetwork(net, fresh ? undefined : decoded.header.level ?? 0);
   // T-3297: a real network started on the other side than its save keeps to
   if (fresh?.rightHand !== undefined && fresh.rightHand !== api!.right_hand()) api!.flip_right_hand();
   api!.set_fleet(h.fleet ?? 0);
@@ -2958,6 +3005,7 @@ async function loadGame(bytes: Uint8Array, from: "autosave" | "file" | "new", fr
   guide = h.mode === "sandbox" ? undefined : h.guide;
   home = h.home;
   copyOf = !fresh && typeof h.copy === "string" && h.copy ? h.copy : undefined;
+  modded = withModded(h.modded);
   api!.set_cash(h.cash + unsettleAfter(h.clock));
   setMode(h.mode === "sandbox" ? "sandbox" : "normal");
   loan = mode === "sandbox" ? null : loanFromSave(h);
@@ -2997,6 +3045,7 @@ function setNewGame(spec?: NewGameSpec) {
   guide = guideWanted && g.mode === "normal" && !testPage ? { done: 0, ...(g.start ? {} : { zoom: true as const }) } : undefined;
   home = undefined;
   copyOf = undefined;
+  modded = withModded(undefined);
   fares = startFares(spec);
   goneLineFares.clear();
 }
@@ -3670,7 +3719,7 @@ function buildSnapshot(): NetworkSnapshot {
       }
     }
     lines.push({
-      id, name: a.line_name(id), stops: [...a.line_stops(id)], ...(back.length ? { backStops: [...back] } : {}), tph: [li[i + 5], li[i + 6], li[i + 7]], hopS, dwellS,
+      id, name: a.line_name(id), stops: [...a.line_run_stops(id)], ...(back.length ? { backStops: [...back] } : {}), tph: [li[i + 5], li[i + 6], li[i + 7]], hopS, dwellS,
       hopKm: [0, 1].map((run) => { const s = a.line_stop_s(id, run); return Array.from({ length: s.length - 1 }, (_, k) => (s[k + 1] - s[k]) / 1000); }),
       ...(!bus && !ferry && a.line_fast(id) ? { fast: true } : {}),
       ...(ferry ? { ferry: true } : {}),
@@ -3780,6 +3829,15 @@ function addPorts(a: TrackApi, ports: FerryPortIn[]): Uint32Array | null {
     out.push(a.last_port());
   }
   return Uint32Array.from(out);
+}
+
+/** T-3588, T-3703: a new bus or ferry line (`r` its edit's answer) at the weekend percent "Apply to all lines" set for
+ * new lines, as a second edit, as a rail line's; both edits' charges. */
+function newLineWeekends(a: TrackApi, r: number, line: number): { r: number; line: number; charge?: number; trainCharge?: number } {
+  if (r !== 0 || newLineWeekendShare === null || newLineWeekendShare === 100) return { r, line };
+  const charge = a.last_charge(), trainCharge = a.last_train_charge();
+  if (a.set_line_weekend_share(line, newLineWeekendShare) !== 0) return { r, line, charge, trainCharge };
+  return { r, line, charge: charge + a.last_charge(), trainCharge: trainCharge + a.last_train_charge() };
 }
 
 /** T-1475: a new bus line's name, "Bus n" with n the sim's next free line number (T-2194: "Ferry n"). */
@@ -4021,7 +4079,9 @@ function applyInner(op: EditOp): Applied {
     case "doubleUp":
       return { r: a.double_up(op.edge) };
     case "oneWay":
-      return { r: a.set_edge_oneway(op.edge, op.dir) };
+      return { r: a.set_edges_oneway(new Uint32Array([op.edge]), new Uint8Array([op.dir])) };
+    case "oneWays":
+      return { r: a.set_edges_oneway(new Uint32Array(op.edges), new Uint8Array(op.dirs)) };
     case "pieceLimit":
       return { r: a.set_edges_limit(new Uint32Array(op.edges), op.kmh) };
     case "stationTracks":
@@ -4049,8 +4109,9 @@ function applyInner(op: EditOp): Applied {
       return { r: a.construct_line(op.line) };
     case "addBusLine": {
       const id = a.new_line_id();
-      const { headwayS: [h, m, l], dwellS, turnaroundS } = NEW_LINE.bus;
-      return { r: a.set_bus_line(id, Float64Array.from(op.route), h, m, l, dwellS, turnaroundS, colourInt(op.colour), op.name || nextBusName(a)), line: id };
+      const { dwellS, turnaroundS } = NEW_LINE.bus;
+      const [h, m, l] = headwaysFor("bus", newLineHeadway)!;
+      return newLineWeekends(a, a.set_bus_line(id, Float64Array.from(op.route), h, m, l, dwellS, turnaroundS, colourInt(op.colour), op.name || nextBusName(a)), id);
     }
     case "busRoute":
       return { r: a.set_bus_route(op.line, Float64Array.from(op.route)) };
@@ -4064,8 +4125,9 @@ function applyInner(op: EditOp): Applied {
       const ports = addPorts(a, op.ports);
       if (!ports) return { r: 1 };
       const id = a.new_line_id();
-      const { headwayS: [h, m, l], dwellS, turnaroundS } = NEW_LINE.ferry;
-      return { r: a.set_ferry_line(id, ports, Float64Array.from(op.route), h, m, l, dwellS, turnaroundS, colourInt(op.colour), op.name || nextBusName(a, "Ferry ")), line: id }; // i18n-ignore: a line's saved name
+      const { dwellS, turnaroundS } = NEW_LINE.ferry;
+      const [h, m, l] = headwaysFor("ferry", newLineHeadway)!;
+      return newLineWeekends(a, a.set_ferry_line(id, ports, Float64Array.from(op.route), h, m, l, dwellS, turnaroundS, colourInt(op.colour), op.name || nextBusName(a, "Ferry ")), id); // i18n-ignore: a line's saved name
     }
     case "ferryRoute": {
       const ports = addPorts(a, op.ports);
@@ -4204,7 +4266,7 @@ function applyInner(op: EditOp): Applied {
     case "groupLook":
       return { r: a.set_line_group_look(op.group, op.symbol.trim(), op.colour === null ? -1 : colourInt(op.colour)) };
     case "fares":
-      fares = { ...(op.nodes ? faresOf({ nodes: op.nodes }, fares) : faresOf({ base: op.base, perKm: op.perKm }, fares)), scales: fares.scales, baseline: FARE_BASELINE, basis: "usd", income: FARE_E, ...(fares.hsr !== undefined ? { hsr: fares.hsr } : {}), ...(fares.ferry !== undefined ? { ferry: fares.ferry } : {}), ...(fares.bus !== undefined ? { bus: fares.bus } : {}), ...(fares.transfer !== undefined ? { transfer: fares.transfer } : {}), ...(fares.ref ? { ref: fares.ref } : {}), ...(fares.lines ? { lines: fares.lines } : {}) };
+      fares = capTransfer({ ...(op.nodes ? faresOf({ nodes: op.nodes }, fares) : faresOf({ base: op.base, perKm: op.perKm }, fares)), scales: fares.scales, baseline: FARE_BASELINE, basis: "usd", income: FARE_E, ...(fares.hsr !== undefined ? { hsr: fares.hsr } : {}), ...(fares.ferry !== undefined ? { ferry: fares.ferry } : {}), ...(fares.bus !== undefined ? { bus: fares.bus } : {}), ...(fares.transfer !== undefined ? { transfer: fares.transfer } : {}), ...(fares.ref ? { ref: fares.ref } : {}), ...(fares.lines ? { lines: fares.lines } : {}) });
       return { r: 0 };
     case "fareLine":
       return { r: Number.isFinite(op.mul) && setLineFare(a, op.line, op.mul) ? 0 : 1 };
@@ -4223,7 +4285,7 @@ function applyInner(op: EditOp): Applied {
     case "fareTransfer": {
       if (!Number.isFinite(op.usd)) return { r: 1 };
       const { transfer: _, ...rest } = fares, v = tidyTransfer(op.usd);
-      fares = v > 0 ? { ...rest, transfer: v } : rest;
+      fares = capTransfer(v > 0 ? { ...rest, transfer: v } : rest);
       return { r: 0 };
     }
     case "fareScale": {
@@ -4371,6 +4433,8 @@ onmessage = (e: MessageEvent<ToClock>) => {
   }
   // T-2802: at once, not behind init's queue, which a save's summary can wait on
   if (msg.kind === "outlines") return outlinesIn(msg.packed);
+  // T-3707: at once, so a game loading now is marked too; the queue below marks the game in hand
+  if (msg.kind === "modded") pageModded = [...new Set([...pageModded, ...msg.why.filter((x) => typeof x === "string")])].slice(0, 16);
   if (msg.kind === "previewStale") {
     previewStaleSeq = Math.max(previewStaleSeq, msg.seq);
     wakeStale?.();
@@ -4393,6 +4457,8 @@ async function processMessage(msg: ToClock) {
       pinFareRef();
       if (syncHolidays()) sendTrips();
     });
+    // T-3722: a leave that comes before the pending game is read must not skip it (a picked file would be lost)
+    initIncoming = !!msg.pending;
     ready = (async () => {
       const t0 = performance.now();
       freezeMemory = (await initWasm(() => init(), "clock worker")).memory; // i18n-ignore
@@ -4422,12 +4488,12 @@ async function processMessage(msg: ToClock) {
         msg.game = pending.spec;
       } else if (pending) {
         incoming = await pendingGame(pending);
-        initIncoming = !!incoming;
         msg.slot = pending.from;
       } else if (msg.pending && msg.game) {
         // T-3478: a new game whose spec is gone from storage is still a new game, never the game left for it
         msg.newSlot = newGameName(await listSlots().catch(() => []), msg.game);
       }
+      initIncoming = !!incoming;
       if (msg.fresh) {
         // T-320: a new game for a check owns no slot, so nothing it does can reach a saved game
         activeSlot = "";
@@ -4680,6 +4746,13 @@ async function handleMessage(msg: ToClock) {
   } else if (msg.kind === "listOrder") {
     api.set_list_order(msg.list, new Uint32Array(msg.ids));
     dirty = edited = true; editAt = Date.now();
+  } else if (msg.kind === "modded") {
+    const was = modded?.length ?? 0;
+    modded = withModded(modded);
+    if ((modded?.length ?? 0) === was) return;
+    dirty = edited = true; editAt = Date.now();
+    sendMoney();
+    void autosave(); // the mark is in the slot at once
   } else if (msg.kind === "sandbox") {
     if (mode === "sandbox") return;
     setMode("sandbox");
@@ -4947,7 +5020,7 @@ async function handleMessage(msg: ToClock) {
       : q.what === "upgradeCost" ?new Float64Array(UPGRADE_BITS.map((b) => api!.station_upgrade_cost(q.node, b)))
       : q.what === "platformCost" ? new Float64Array([api.platform_cost(new Uint32Array(q.nodes), q.platform)])
       : q.what === "doubleUp" ? doubleUpAnswer(q.edge)
-      : q.what === "oneWay" ? new Float64Array(api.oneway_effects(q.edge, q.dir))
+      : q.what === "oneWays" ? new Float64Array(api.oneway_effects_many(new Uint32Array(q.edges), new Uint8Array(q.dirs)))
       : q.what === "lineAccount" ? api.line_account(q.line, q.day)
       : q.what === "linePeriods" ? api.line_periods(q.line, q.day)
       : q.what === "linesPeriods" ? linesPeriods(api, q.lines, q.day)

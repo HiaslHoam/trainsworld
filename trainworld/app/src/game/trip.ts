@@ -9,7 +9,9 @@
 
 import { t as tr } from "../i18n";
 import { signal } from "@preact/signals";
-import { lngLatToPack } from "./coords";
+import { cityById, cityWithin } from "./cities";
+import { lngLatToPack, packToLngLat } from "./coords";
+import { fareWeight } from "./income";
 import { stationNameNear } from "./places";
 import type { Flows } from "./demand";
 import { PERIODS } from "./periods";
@@ -17,6 +19,7 @@ import { EVERYDAY_KEYS, FILTER_PURPOSES, shownKey, type PurposeFilter, type Purp
 import type { CommutersOneWay, Selection } from "./types";
 import { MARKET_TRIP_LAYOUT, TRIP_LAYOUT } from "../workers/demandProtocol";
 import { stationNames, stationsById, world } from "./world";
+import { vehicleOf, type Vehicle } from "./vehicle";
 
 /** One leg of a route: a ride on a line, or a walk after a ride, to another station or between the
  * platforms of one (T-717). */
@@ -99,9 +102,6 @@ export interface TripPair {
 
 /** Why the train is not a choice for a trip. */
 export type NoRail = "" | "noStationStart" | "noStationEnd" | "walksTooLong" | "noRoute" | "walkFurther";
-/** Perceived minutes a dollar of the car's money (ownership, parking, a ride to a station): the
- * sim's `api::FARE_MIN_PER_USD`, whatever the country (T-1277). */
-export const CAR_MIN_PER_USD = 3;
 const WHY: NoRail[] = ["", "noStationStart", "noStationEnd", "walksTooLong", "noRoute", "walkFurther"];
 
 /** The trip in one period. Minutes are perceived where named so, else real. */
@@ -156,8 +156,8 @@ export interface TripPeriod {
   baseFarePerceived: number;
   /** T-1801: the transfer fare each change pays, perceived minutes (0 none) */
   xferFarePerceived: number;
-  /** perceived minutes a fare dollar, the riders' country's (T-1277); the car's money is at
-   * `CAR_MIN_PER_USD` */
+  /** perceived minutes a fare dollar, the riders' country's (T-1277); the car's money is shown at it too
+   * (T-3627: the sim counts it at 3 a dollar, so the dollars shown are its minutes over this) */
   minPerUsd: number;
   /** the cheapest perceived walk at each end */
   walkStartPerceived: number;
@@ -275,9 +275,11 @@ function readRoutes(v: Float64Array, o: number, nr: number, at: RouteNodes): Tri
   return routes;
 }
 
-/** Why the market's rail is not offered between two zones (T-866). */
-export type MarketNoRail = "" | "farClosed" | "noRail" | "unmatched";
-const MARKET_WHY: MarketNoRail[] = ["", "farClosed", "noRail", "unmatched"];
+/** Why the market's rail is not offered between two zones (T-866), as `IntercityApi.market_trip`
+ * says; T-3632: "noPart" and "unanswered" are the worker's stand-ins, with no market part on its
+ * network or none that solved the period. An unanswered period reads as not answered. */
+export type MarketNoRail = "" | "farClosed" | "noRail" | "unmatched" | "noTrain" | "noAlt" | "noPart" | "unanswered";
+const MARKET_WHY: MarketNoRail[] = ["", "farClosed", "noRail", "unmatched", "noTrain", "noAlt", "noPart", "unanswered"];
 
 /**
  * T-866: the longer trips between a selection and a far place (or one of its 6 km zones) in one
@@ -325,7 +327,7 @@ const { HEAD: MT_HEAD, PAIR_LEN: MT_PAIR_LEN } = MARKET_TRIP_LAYOUT;
 
 /** Read one period's `IntercityApi.market_trip` answer. */
 export function readMarketPeriod(v: Float64Array, at: RouteNodes): MarketPeriod | null {
-  if (v.length < MT_HEAD || v[0] !== 1) return null;
+  if (v.length < MT_HEAD || v[0] !== 1 || MARKET_WHY[v[14]] === "unanswered") return null;
   const st = (rn: number) => stationAt(at, rn);
   const np = v[11], nr = v[12];
   const pairs: TripPair[] = [];
@@ -421,6 +423,16 @@ export function mergeMarketPeriods(xs: (MarketPeriod | null)[], label: (r: TripR
   };
 }
 
+/** T-3627: perceived minutes a dollar weighs in the trip's city, for the car's money as shown. The sim counts that
+ * money at 3 a dollar whatever the country, so the dollars shown are its minutes over the fare weight, and a city's
+ * transit and car hovers use one figure. The period's own figure is the sim's default 3 where no train is offered,
+ * so the country's is read from the trip's start. */
+export function cityMinPerUsd(t: Pick<TripPeriod, "from" | "minPerUsd">): number {
+  const [lng, lat] = packToLngLat(t.from[0], t.from[1]);
+  const city = cityWithin(lng, lat);
+  return city ? fareWeight(cityById(city).country) : t.minPerUsd;
+}
+
 /** What a route's totals and terms read from its period; the market's has no transfer fare. */
 type RouteCosts = Pick<TripPeriod, "pairs" | "baseFarePerceived" | "minPerUsd"> & { xferFarePerceived?: number };
 
@@ -453,6 +465,18 @@ export function routeCrowding(r: TripRoute) {
   return { crowding, fullWait };
 }
 
+/** What the rides that waited for room run, for the words of that wait: their vehicle where it is one kind,
+ * "ride" where the row sums rides of different kinds. */
+export function roomVehicle(r: TripRoute): Vehicle | "ride" {
+  const kinds = new Set<Vehicle>();
+  for (const l of r.legs) {
+    if (l.kind !== "ride" || l.fullWaitMin < 0.05) continue;
+    const st = world.peek()?.lineStats[l.line];
+    kinds.add(st ? vehicleOf(st) : "train");
+  }
+  return kinds.size === 1 ? [...kinds][0] : kinds.size === 0 ? "train" : "ride";
+}
+
 /** One term of a route's perceived total: what it is, its real amount (minutes, dollars for the
  * fare, or a count of changes) with the weight it counts at, and its perceived minutes. */
 export interface CostTerm {
@@ -464,6 +488,8 @@ export interface CostTerm {
   weight: number;
   perceived: number;
   unit: "min" | "usd" | "count";
+  /** the wait for room only: what the rides run, for `termLabel` */
+  vehicle?: Vehicle | "ride";
 }
 
 /** A route's perceived total as terms, from the worker's own perceived minutes: the walks (or the
@@ -482,7 +508,7 @@ export function routeTerms(t: RouteCosts, r: TripRoute): CostTerm[] {
       out.push({ id: "drive", label: tr("trip.drive"), real: pair.accessMin, weight: pair.accessMin > 0 ? drive / pair.accessMin : 1, perceived: drive, unit: "min" });
       out.push({ id: pair.rideDropOff ? "drop-off" : "parking at the station", label: tr(pair.rideDropOff ? "trip.dropOff" : "trip.parkingStation"), real: 0, weight: 1, perceived: pair.rideStation, unit: "min" }); // i18n-ignore
       out.push({ id: "parking at home", label: tr("trip.parkingHome"), real: 0, weight: 1, perceived: pair.rideHome, unit: "min" }); // i18n-ignore
-      out.push({ id: "car", label: tr("trip.car"), real: pair.rideCar / CAR_MIN_PER_USD, weight: CAR_MIN_PER_USD, perceived: pair.rideCar, unit: "usd" });
+      out.push({ id: "car", label: tr("trip.car"), real: pair.rideCar / t.minPerUsd, weight: t.minPerUsd, perceived: pair.rideCar, unit: "usd" });
     }
     const walkPerc = pair.egressPerceived + (pair.accessRide ? 0 : pair.accessPerceived);
     if (tot.walkMin > 0) out.push({ id: "walk", label: tr("trip.walk"), real: tot.walkMin, weight: walkPerc / tot.walkMin, perceived: walkPerc, unit: "min" });
@@ -495,7 +521,7 @@ export function routeTerms(t: RouteCosts, r: TripRoute): CostTerm[] {
   const { crowding, fullWait } = routeCrowding(r);
   const wait = tot.wait - fullWait;
   out.push({ id: "wait", label: tr("trip.wait"), real: wait, weight: wait > 0 ? (waitP - fullWait) / wait : 1, perceived: waitP - fullWait, unit: "min" });
-  if (fullWait >= 0.05) out.push({ id: "waiting for a train with room", label: tr("trip.waitRoom"), real: fullWait, weight: 1, perceived: fullWait, unit: "min" }); // i18n-ignore
+  if (fullWait >= 0.05) out.push({ id: "waiting for a train with room", label: tr("trip.waitRoom", { vehicle: roomVehicle(r) }), vehicle: roomVehicle(r), real: fullWait, weight: 1, perceived: fullWait, unit: "min" }); // i18n-ignore
   out.push({ id: "ride", label: tr("trip.ride"), real: tot.ride, weight: 1, perceived: tot.ride, unit: "min" });
   if (crowding >= 0.05) out.push({ id: "crowding", label: tr("trip.crowding"), real: 0, weight: 1, perceived: crowding, unit: "min" });
   if (tot.xfer > 0) out.push({ id: "walk between stations", label: tr("trip.walkBetween"), real: tot.xfer, weight: xferP / tot.xfer, perceived: xferP, unit: "min" }); // i18n-ignore
@@ -605,11 +631,15 @@ export function wholePeople(shares: number[], n: number, pooled = -1): number[] 
 /** T-911: the whole number of people `n` trips a day stand for (at least one, when there are any). */
 export const peopleOf = (n: number) => (n > 0 ? Math.max(1, Math.round(n)) : 0);
 
+/** T-3641: the whole people the trip explorer's modes are shared out over: none (the model's own shares)
+ * under one trip a day, where rounding to one person is all or nothing and the period rows disagree. */
+export const countedPeople = (n: number) => (n >= 1 ? Math.round(n) : 0);
+
 /** T-1902: the headline counts at least one whole train trip (as its bar rounds the modes), so the
  * explorer shows a train route even where the two exact points have none (`TripPeriod.lifted`). */
 export function countsTrain(mix: TripMix | null): boolean {
   const n = mix ? mix.rail + mix.walk + mix.drive : 0;
-  return n > 0 && wholePeople([mix!.rail, mix!.walk, mix!.drive], peopleOf(n))[0] > 0;
+  return n > 0 && (n < 1 ? mix!.rail > 0 : wholePeople([mix!.rail, mix!.walk, mix!.drive], countedPeople(n))[0] > 0);
 }
 
 /** Trips a day (legs both ways) between two places by mode, under the purpose filter. */

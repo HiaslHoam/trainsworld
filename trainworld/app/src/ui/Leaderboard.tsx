@@ -4,12 +4,13 @@
 // them when lower, and at the bottom Sign in to be listed, a name with Join, or Leave the
 // leaderboards. Each person once per board, with their best normal game there at its current figures (T-3248; shonei-server's trainworld.go).
 
+import { FindInput } from "./FindInput";
 import { useEffect, useMemo, useState } from "preact/hooks";
 import { normalise } from "../game/search";
 import { tPlace } from "../i18n/places";
 import { findStart } from "./NewGame";
 import { CITIES, zoneCountry } from "../game/cities";
-import { accountOpen, accountState, boardSetting, boards, boardsOpen, fetchBoards, session, setBoard, type BoardRow } from "../game/account";
+import { accountOpen, accountState, boardSetting, boards, boardsOpen, fetchBoards, scoresRefused, session, setBoard, type BoardRow } from "../game/account";
 import { exact } from "../game/format";
 import { t, tCountry } from "../i18n";
 import { countryName } from "../i18n/intl";
@@ -35,14 +36,19 @@ function Row({ r, board, mine }: { r: BoardRow; board: string; mine: boolean }) 
   </li>;
 }
 
-function Join() {
+/** `top`: the way in (sign in, or a name with Join) above the boards, so players see they can join; the foot holds Leave. */
+function Join({ top }: { top?: boolean }) {
   const b = boardSetting.value;
+  const joined = !!session.value && !!b?.on;
   const [name, setName] = useState(b?.name ?? "");
   const [msg, setMsg] = useState("");
   const run = (f: () => Promise<unknown>) => { setMsg(""); f().then(() => fetchBoards()).catch((e) => setMsg(e.message)); };
   useEffect(() => { if (b?.name) setName(b.name); }, [b?.name]);
-  return <div class="lb-foot">
+  if (!!top === joined) return null;
+  return <div class={top ? "lb-foot lb-join" : "lb-foot"}>
     {moneyState.value?.mode === "sandbox" && <p class="small muted">{t("leaderboard.sandbox")}</p>}
+    {moneyState.value?.mode !== "sandbox" && moneyState.value?.modded && <p class="small muted">{t("leaderboard.modded")}</p>}
+    {!moneyState.value?.modded && moneyState.value?.mode !== "sandbox" && scoresRefused.value && <p class="small muted">{t("leaderboard.unpublished")}</p>}
     {!session.value
       ? <button class="btn text" onClick={() => { boardsOpen.value = false; accountOpen.value = true; }}>{t("leaderboard.signIn")}</button>
       : b?.on
@@ -91,7 +97,7 @@ export function CityPick({ boardKey, mine, all, countries, more, onPick }: { boa
   }, [text, mine, all, countries, more]);
   const pick = (key: string) => { setText(null); if (onPick) onPick(key); else void fetchBoards(key); (document.activeElement as HTMLElement | null)?.blur(); };
   return <div class="lb-find">
-    <input type="text" class="new-game-find lb-pick" aria-label={t("leaderboard.pick")} placeholder={t("newGame.findCity")} maxLength={60}
+    <FindInput type="text" class="new-game-find lb-pick" showClear={!!text} onClear={() => { setText(""); setCursor(0); }} aria-label={t("leaderboard.pick")} placeholder={t("newGame.findCity")} maxLength={60}
       value={text ?? current}
       onFocus={(e) => { setText(""); setCursor(0); (e.target as HTMLInputElement).select(); }}
       onBlur={() => setText(null)}
@@ -123,6 +129,7 @@ function Boards() {
   const lands = [...new Set([...mine.map((id) => zoneCountry(id)?.toLowerCase() ?? ""), ...Object.keys(st.list).filter((k) => k.startsWith(COUNTRY)).map((k) => k.slice(COUNTRY.length))].filter(Boolean))];
   const meIn = d?.me && d.rows.some((r) => r.rank === d.me!.rank && r.name === d.me!.name);
   return <>
+    <Join top />
     <CityPick boardKey={key} mine={mine} all={new Set([...mine, ...others])} countries={lands} />
     {!d ? <p class="small muted">{st.error || t("leaderboard.loading")}</p>
       : <ol class="lb-rows">

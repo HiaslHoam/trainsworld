@@ -10,7 +10,7 @@ import { modeColours } from "../../game/palette";
 import { PERIODS } from "../../game/periods";
 import { purposeName, purposeWords, type PurposeFilter } from "../../game/purposes";
 import { WALK_KMH } from "../../game/walks";
-import { baseFareOf, CAR_MIN_PER_USD, countsTrain, openRoute, peopleOf, routeCrowding, routeLabel, routeTerms, routeTotals, stationName, tripOpenedFrom, tripPeriod, tripView, wholePeople, type TripMix, type TripPeriod, type TripRoute } from "../../game/trip";
+import { baseFareOf, cityMinPerUsd, countedPeople, countsTrain, openRoute, routeCrowding, roomVehicle, routeLabel, routeTerms, routeTotals, stationName, tripOpenedFrom, tripPeriod, tripView, wholePeople, type TripMix, type TripPeriod, type TripRoute } from "../../game/trip";
 import { purposeFilter, selection, shownDayPhrase } from "../../game/ui";
 import { linesById, stationNames, world } from "../../game/world";
 import { lowerWord, t as tr, tRich, tSeries } from "../../i18n";
@@ -18,7 +18,7 @@ import { shownPeriod } from "../../map/tripView";
 import { Actions, SegBar } from "../widgets";
 import { MarketTrip } from "./MarketTrip";
 import { legRows, PeriodRows, routeRow, StationLink } from "./RouteParts";
-import { equation, minFix1, minNum1, minRound, minText, modeName, noRoad, num1, pct1, pctShare, rideTip, roundTo, sumLine, termLabel, tripsAmount, tripWords, usd, type ModeId, type Term } from "./tripText";
+import { BUS_BOARD_FELT_MIN, equation, minFix1, minNum1, minRound, minText, modeName, noRoad, num1, pct1, pctShare, rideTip, roundTo, sumLine, termLabel, tripsAmount, tripWords, usd, type ModeId, type Term } from "./tripText";
 
 /** T-910: why the train is not offered. Too long a way to and from the trains says which end
  * holds it back: people drive to a station from home on trips of `rideMinKm` or more, and walk
@@ -45,7 +45,7 @@ const trips = (n: number, f: PurposeFilter) => tripsAmount(count(n), n, f);
  * main route's sum by a last term. `pooled` false: the route's own sum alone (T-870). */
 function trainEquation(t: TripPeriod, r: TripRoute, pooled = true): string {
   const terms: Term[] = routeTerms(t, r).filter((x) => x.perceived !== 0 || x.unit === "usd").map((x) => ({
-    label: termLabel(x.id),
+    label: termLabel(x.id, x.vehicle),
     real: x.unit === "usd" ? usd(x.real) : x.real > 0 ? num1(x.real) : "",
     weight: x.weight,
     perceived: x.perceived,
@@ -67,6 +67,8 @@ function timeEquation(tot: ReturnType<typeof routeTotals>): string {
 
 /** Walks over this straight-line distance are not offered by the model. */
 const WALK_REACH_M = 10000;
+/** T-3624: what a school trip's road cost holds beyond the drive, parking and ownership: the car's second weight. */
+const schoolExtra = (t: TripPeriod) => t.roadPerceived - t.drivePerceived - t.parkPerceived - t.carOwnPerceived;
 
 /** T-628, T-992: the headline gets a walk row when walking the whole way takes under this, real
  * minutes, or whatever it takes when walking has a share. */
@@ -89,13 +91,13 @@ function ModeBar({ t, mix, of }: { t: TripPeriod; mix: TripMix | null; of: strin
   const n = m ? m.rail + m.walk + m.drive + m.none : 0;
   const model = n > 0 ? [m!.rail / n, m!.walk / n, m!.drive / n, m!.none / n] : [t.pTrain, t.pWalk, t.pDrive, t.pNone];
   // T-911: counted trips are whole people; the representative trip's chances stay as they are
-  const [train, walk, drive, none] = roundTo(model, peopleOf(n));
+  const [train, walk, drive, none] = roundTo(model, countedPeople(n));
   type Mode = "train" | "walk" | "drive" | "none";
   const parts: [Mode, number, string][] = [["train", train, "seg-train"], ["walk", walk, "seg-walk"], ["drive", drive, "seg-drive"],
     ...(t.apart || none > 0 ? [["none", none, "seg-none"] as [Mode, number, string]] : [])];
   const walkTip = tr("tripInspector.walkClause", { min: minText(t.walkMin) });
   const note = n > 0 ? "" : groupNote(t);
-  const modelTip = (i: number) => (n > 0 ? "\n" + tr("tripText.modelLine", { share: pct1(model[i]) }) : "");
+  const modelTip = (i: number) => (n >= 1 ? "\n" + tr("tripText.modelLine", { share: pct1(model[i]) }) : "");
   const stands = (m: Mode) => (STANDS_FOR[m] ? "\n" + tr(STANDS_FOR[m]!) : "");
   const extra = (m: Mode) => (m === "walk" && !t.apart ? walkTip : "");
   // walking and driving between two land parts are 0: their rows go, By car and By walking say why
@@ -138,7 +140,9 @@ function RouteLegs({ t, r }: { t: TripPeriod; r: TripRoute }) {
       )}
       {legRows(r, name, ln, (l) => {
         // T-842: riders arriving when no train is due for hours weigh on the wait as felt
-        return rideTip(l, w.lineStats[l.line], l.fullWaitMin, l.waitPerceived - l.waitMin);
+        // the felt wait also carries the bus boarding cost (sim `BUS_BOARD_MIN`, T-1576), which is no service gap
+        const st = w.lineStats[l.line];
+        return rideTip(l, st, l.fullWaitMin, Math.max(0, l.waitPerceived - l.waitMin - (st?.bus ? BUS_BOARD_FELT_MIN : 0)));
       })}
       {pair && last && (
         <li data-tip={walkTip(pair.egressM, pair.egressMin)}>
@@ -155,8 +159,8 @@ function RouteLegs({ t, r }: { t: TripPeriod; r: TripRoute }) {
 function FareRows({ t, r }: { t: TripPeriod; r: TripRoute }) {
   const tot = routeTotals(t, r);
   const pair = t.pairs[r.pair];
-  const car = pair?.accessRide ? pair.rideCar / CAR_MIN_PER_USD : 0;
-  const parking = pair?.accessRide ? pair.rideStationMoney / CAR_MIN_PER_USD : 0;
+  const car = pair?.accessRide ? pair.rideCar / t.minPerUsd : 0;
+  const parking = pair?.accessRide ? pair.rideStationMoney / t.minPerUsd : 0;
   return (
     <>
       <li data-tip={tr("tripText.baseFare", { fare: usd(baseFareOf(t, r) / t.minPerUsd), xfer: tot.xferUsd > 0, xferFare: tot.xferUsd > 0 ? usd(tot.xferUsd / tot.changes) : "" })}>
@@ -185,8 +189,8 @@ function CrowdRows({ r }: { r: TripRoute }) {
         </li>
       )}
       {fullWait >= 0.05 && (
-        <li data-tip={tr("tripInspector.fullWaitTip", { min: minNum1(fullWait) })}>
-          <span class="grow">{tr("tripInspector.waitForRoom")}</span>
+        <li data-tip={tr("tripInspector.fullWaitTip", { min: minNum1(fullWait), vehicle: roomVehicle(r) })}>
+          <span class="grow">{tr("tripInspector.waitForRoom", { vehicle: roomVehicle(r) })}</span>
           <span class="val">{minText(fullWait)}</span>
         </li>
       )}
@@ -218,7 +222,7 @@ function RouteDetail({ t, r }: { t: TripPeriod; r: TripRoute }) {
     .map((k) => [k, (a.get(k) ?? 0) - (b.get(k) ?? 0)] as const)
     .filter(([, d]) => Math.abs(d) >= 0.05);
   const diffTip = tr("tripInspector.diffTip", { own: minText(own), main: minText(mainOwn) }) +
-    (parts.length ? "\n" + parts.map(([k, d]) => tr("tripInspector.diffTerm", { term: termLabelCap(k), delta: tr("inspector.min", { n: (d > 0 ? "+" : "−") + num1(Math.abs(d)) }) })).join("\n") : "");
+    (parts.length ? "\n" + parts.map(([k, d]) => tr("tripInspector.diffTerm", { term: termLabelCap(k, roomVehicle(r)), delta: tr("inspector.min", { n: (d > 0 ? "+" : "−") + num1(Math.abs(d)) }) })).join("\n") : "");
   return (
     <div class="trip-alt">
       <RouteLegs t={t} r={r} />
@@ -242,7 +246,7 @@ function RouteDetail({ t, r }: { t: TripPeriod; r: TripRoute }) {
   );
 }
 
-const termLabelCap = (id: string) => capitalise(termLabel(id));
+const termLabelCap = (id: string, vehicle?: string) => capitalise(termLabel(id, vehicle));
 
 /** The main route's group, up to four other routes and the many small ones left (T-709), with
  * their shares of the train riders: in whole riders when `riders` (T-911; the small ones together
@@ -406,6 +410,7 @@ export function TripInspector() {
   if (!t) return <>{head}<p class="muted">{tr("cityInspector.calculating")}</p></>;
   const main = t.routes[0];
   const tot = main ? routeTotals(t, main) : null;
+  const carW = cityMinPerUsd(t);
   const pair = main ? t.pairs[main.pair] : null;  // T-586: the trips the view counts between the two places, and the trip the routes are read for
   const mix = v!.mix;
   const n = mix ? mix.rail + mix.walk + mix.drive : 0;
@@ -414,7 +419,7 @@ export function TripInspector() {
   const periodLow = lowerWord(period);
   const of = n >= 0.5 ? tr("tripInspector.ofTrips", { trips: trips(n, filter), day }) : n > 0 ? tr("tripInspector.ofTrips", { trips: tripWords(filter), day }) : tr("tripInspector.ofPeople", { period: periodLow });
   // T-911: the train riders the headline counts, in whole trips, for the route shares (none: the model's)
-  const riders = n > 0 ? wholePeople([mix!.rail, mix!.walk, mix!.drive], peopleOf(n))[0] || null : null;
+  const riders = n > 0 ? wholePeople([mix!.rail, mix!.walk, mix!.drive], countedPeople(n))[0] || null : null;
   const trainCounted = countsTrain(mix);
   const countTip = n > 0 ? [tr("tripInspector.countTip", { amount: exact(n), trips: tripWords(filter), day }), ...(filter === "all" ? mix!.purposes.filter((p) => p.rail + p.walk + p.drive >= 0.5).map((p) => tr("tripText.labelValue", { label: purposeName(p.key), value: exact(p.rail + p.walk + p.drive) })) : [])].join("\n") : tr("tripInspector.straightLine", { distance: distance(t.distM) });
   const words = purposeWords(v!.purpose);
@@ -473,13 +478,15 @@ export function TripInspector() {
         {t.carOwnPerceived > 0 && (
           <li data-tip={tr("tripInspector.ownershipTip", { unit: distUnit() })}>
             <span class="grow">{tr("tripInspector.carOwnership")}</span>
-            <span class="val">{usd(t.carOwnPerceived / CAR_MIN_PER_USD)}</span>
+            <span class="val">{usd(t.carOwnPerceived / carW)}</span>
           </li>
         )}
         <li data-tip={equation([
           { label: termLabel("drive"), real: num1(t.driveMin), weight: t.driveMin > 0 ? t.drivePerceived / t.driveMin : 1, perceived: t.drivePerceived },
           { label: termLabel("parking"), real: "", weight: 1, perceived: t.parkPerceived },
-          ...(t.carOwnPerceived > 0 ? [{ label: termLabel("ownership"), real: usd(t.carOwnPerceived / CAR_MIN_PER_USD), weight: CAR_MIN_PER_USD, perceived: t.carOwnPerceived, usd: true }] : []),
+          ...(t.carOwnPerceived > 0 ? [{ label: termLabel("ownership"), real: usd(t.carOwnPerceived / carW), weight: carW, perceived: t.carOwnPerceived, usd: true }] : []),
+          // T-3624: a school trip weighs its car twice (sim everyday.rs SCHOOL_CAR_MUL); the rest of the road's cost is that
+          ...(v!.purpose === "school" && schoolExtra(t) > 0.05 ? [{ label: termLabel("driven by a parent"), real: "", weight: 1, perceived: schoolExtra(t) }] : []),
         ], avg ? t.roadPerceived : undefined) + (avg ? `\n${avgTip}` : "")}>
           <span class="grow">{tr("tripText.effectiveTime")}</span>
           <span class="val">{minText(t.roadPerceived)}</span>

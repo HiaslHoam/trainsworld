@@ -7,7 +7,7 @@
 //! (`trip::routes`). Nothing here changes any state.
 
 use super::*;
-use crate::demand::trip::{routes, Leg};
+use crate::demand::trip::routes;
 
 /// Numbers in the answer's head and per station pair (`IntercityApi::market_trip`); a leg is
 /// `trip::LEG_LEN` numbers.
@@ -26,6 +26,47 @@ const OK: f64 = 0.;
 const FAR_NOT_OPEN: f64 = 1.;
 const NO_RAIL: f64 = 2.;
 const NOT_MATCHED: f64 = 3.;
+/// T-3632: lines join the two ends' stations, but none runs a train between them this period
+const NO_TRAIN: f64 = 4.;
+/// T-3632: no road or flight joins the two places, so their pairs are never solved (`has_alt`)
+const NO_ALT: f64 = 5.;
+
+/// Under this share of its pair's riders a route is not walked when no pair gave one at the usual
+/// bars (T-3724).
+const ROUTE_FLOOR: f32 = 1e-4;
+
+/// The routes listed, biggest first, as (pair index, share of the rail riders, legs): every route
+/// of the pairs from the biggest down to `PAIR_MIN` carrying `ROUTE_MIN` of the riders, at most
+/// `MAX_ROUTES`; and always one while any rail rides (T-1500: riders spread thin over many station
+/// pairs, big networks at both ends). The bar `ROUTE_MIN / share` turns away every route of a pair
+/// a little over `PAIR_MIN` whose riders split (T-3724), so with none gathered the pairs are walked
+/// again in order at `ROUTE_FLOOR` and the first one's biggest route kept. `shares`:
+/// each pair's share of the rail riders, biggest first; `walk(pair, min)` its routes carrying
+/// `min` of the pair's riders, biggest first.
+fn pick_routes<L>(shares: &[f32], mut walk: impl FnMut(usize, f32) -> Vec<(f32, L)>) -> Vec<(usize, f32, L)> {
+    let mut all: Vec<(usize, f32, L)> = vec![];
+    for (pi, &share) in shares.iter().enumerate() {
+        if pi > 0 && (share as f64) < PAIR_MIN {
+            break;
+        }
+        let min = if (share as f64) < PAIR_MIN { ROUTE_MIN } else { ROUTE_MIN / share };
+        for (rs, legs) in walk(pi, min) {
+            all.push((pi, rs * share, legs));
+        }
+    }
+    if all.is_empty() {
+        for (pi, &share) in shares.iter().enumerate() {
+            if let Some((rs, legs)) = walk(pi, ROUTE_FLOOR).into_iter().next() {
+                all.push((pi, rs * share, legs));
+                break;
+            }
+        }
+    }
+    all.sort_by(|x, y| y.1.total_cmp(&x.1));
+    let kept = all.iter().take_while(|r| r.1 >= ROUTE_MIN).count().clamp(1, MAX_ROUTES);
+    all.truncate(kept);
+    all
+}
 
 impl IntercityApi {
     /// The selection's zone weights (`selection`'s): by people (`dir` 0) or attraction (1).
@@ -108,7 +149,9 @@ impl IntercityApi {
     /// pairs' mean distance, km; the base fare (perceived
     /// minutes) and perceived minutes per dollar; station pairs, routes; the rail riders' share on
     /// routes not listed; why rail is not offered (0 offered, 1 the far place is not open here, 2
-    /// no zone pair rail can serve, 3 no square matched a site); the share of the trips on pairs
+    /// no zone pair rail can serve, 3 no square matched a site, 4 the ends' stations are on one
+    /// network but no path joins them this period, 5 no car or plane joins the two places, so the
+    /// pairs are never solved; the app's worker adds 6 and 7, `trip.ts`); the share of the trips on pairs
     /// rail can serve; the reference mode's perceived minutes (the car's, or the plane's where no
     /// car goes), trip weighted; zone pairs counted; then (T-1229) the everyday outings across a
     /// zone line between the two ends, as the pairs choose them: legs a day, rail legs and walking
@@ -248,6 +291,9 @@ impl IntercityApi {
         let mut fares: Vec<f32> = vec![];
         let beta = p.beta as f64;
         let mut oc = 0f64;
+        // T-3632: why no rail, for the answer with none: some pair with no car or plane, some
+        // pair joined by lines with no path this period
+        let (mut no_alt, mut no_train) = (false, false);
         for &z in &near {
             for &b in &fars {
                 if z == b {
@@ -256,6 +302,9 @@ impl IntercityApi {
                 let (a, bb) = if dir == 0 { (z, b) } else { (b, z) };
                 let (za, zb) = (&m.zones[a], &m.zones[bb]);
                 let trips = m.eachway(za, zb);
+                if !m.pr(za.place, zb.place).has_alt() {
+                    no_alt = true;
+                }
                 if trips < m.rule.min_trips {
                     continue;
                 }
@@ -318,6 +367,8 @@ impl IntercityApi {
                 }
                 if offered {
                     served += t;
+                } else if mix.is_some_and(|x| x.sum <= 0.) {
+                    no_train = true;
                 }
             }
         }
@@ -425,7 +476,7 @@ impl IntercityApi {
         }
         h[18] = n;
         if rail_all <= 0. {
-            h[14] = NO_RAIL;
+            h[14] = if no_alt { NO_ALT } else if no_train { NO_TRAIN } else { NO_RAIL };
             h[13] = 1.;
             return h;
         }
@@ -440,22 +491,11 @@ impl IntercityApi {
         for &((sa, sb), (x, xa, xb)) in &pairs {
             body.extend([rep[sa as usize], rep[sb as usize], xa / x, xb / x, sk.r[sa as usize * s + sb as usize] as f64, x / rail_all, 0.]);
         }
-        let mut all_routes: Vec<(usize, f32, Vec<Leg>)> = vec![];
-        // T-1500: the biggest pair is always walked and its biggest route kept, so riders spread thin
-        // over many station pairs (big networks at both ends) still show a route
-        for (pi, &((sa, sb), (x, _, _))) in pairs.iter().enumerate() {
-            let share = (x / rail_all) as f32;
-            if pi > 0 && (share as f64) < PAIR_MIN {
-                break;
-            }
-            let min = if (share as f64) < PAIR_MIN { ROUTE_MIN } else { ROUTE_MIN / share };
-            for (rs, legs) in routes(g, &sk, p, sa as usize, sb as usize, min) {
-                all_routes.push((pi, rs * share, legs));
-            }
-        }
-        all_routes.sort_by(|x, y| y.1.total_cmp(&x.1));
-        let kept = all_routes.iter().take_while(|r| r.1 >= ROUTE_MIN).count().clamp(1, MAX_ROUTES);
-        all_routes.truncate(kept);
+        let shares: Vec<f32> = pairs.iter().map(|&(_, (x, _, _))| (x / rail_all) as f32).collect();
+        let all_routes = pick_routes(&shares, |pi, min| {
+            let (sa, sb) = pairs[pi].0;
+            routes(g, &sk, p, sa as usize, sb as usize, min)
+        });
         h[11] = pairs.len() as f64;
         h[12] = all_routes.len() as f64;
         h[13] = (1. - all_routes.iter().map(|r| r.1 as f64).sum::<f64>()).max(0.);
@@ -469,5 +509,35 @@ impl IntercityApi {
             }
         }
         out
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A pair's riders split evenly over `n` routes; the routes carrying `min` of the pair returned.
+    fn split(n: usize) -> impl FnMut(usize, f32) -> Vec<(f32, usize)> {
+        move |pi, min| (0..n).map(|k| (1. / n as f32, 10 * pi + k)).filter(|r| r.0 >= min).collect()
+    }
+
+    /// T-3724: riders spread over many station pairs, the biggest a little over `PAIR_MIN` and split
+    /// two ways (New York to Philadelphia, a player's save, evening): a route is still listed.
+    #[test]
+    fn rail_riders_always_list_a_route() {
+        let thin = [0.0062f32, 0.0049, 0.004, 0.003];
+        let r = pick_routes(&thin, split(2));
+        assert_eq!(r.len(), 1, "{:?}", r.iter().map(|x| (x.0, x.1)).collect::<Vec<_>>());
+        assert_eq!((r[0].0, r[0].2), (0, 0), "the biggest pair's biggest route");
+        // a four-way split of a bigger pair, each route just under its bar
+        assert_eq!(pick_routes(&[0.019f32, 0.004], split(4)).len(), 1);
+        // the biggest pair yields nothing (its two ends one station): the next one's route
+        let r = pick_routes(&thin, |pi, min| if pi == 0 { vec![] } else { split(2)(pi, min) });
+        assert_eq!((r.len(), r[0].0), (1, 1));
+        // no pair yields any: none
+        assert!(pick_routes(&thin, |_, _| Vec::<(f32, usize)>::new()).is_empty());
+        // riders on few pairs: every route over `ROUTE_MIN`, as before
+        let r = pick_routes(&[0.7f32, 0.3], split(2));
+        assert_eq!(r.iter().map(|x| x.2).collect::<Vec<_>>(), vec![0, 1, 10, 11]);
     }
 }

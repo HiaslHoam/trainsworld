@@ -86,6 +86,60 @@ fn corridor_rows_are_the_corridors_with_trips() {
         assert_eq!([rm[2 * j].to_bits(), rm[2 * j + 1].to_bits()], [modes[2 * i].to_bits(), modes[2 * i + 1].to_bits()]);
     }
 }
+/// T-2136: a place's rows (`place_rows`, `rows_at`) are the table's rows touching it, to the bit, and
+/// the summary's sums and row count are the table's.
+#[test]
+fn place_rows_are_the_table_rows_of_a_place() {
+    let mut a = api();
+    network(&mut a, 6., 1.);
+    a.solve(0);
+    let (rows, rp, rt, rc, rm) = (a.corridor_rows(), a.corridor_rows_pairs(), a.corridor_rows_trips(), a.corridor_rows_commutes(), a.corridor_rows_modes());
+    let np = a.m.places.len();
+    let col = |j: usize| [rows[j] as f64, rp[2 * j] as f64, rp[2 * j + 1] as f64, rt[j], rc.get(j).copied().unwrap_or(0.), rm[2 * j] as f64, rm[2 * j + 1] as f64];
+    for p in 0..np as u32 {
+        let want: Vec<f64> = (0..rows.len()).filter(|&j| rp[2 * j] == p || rp[2 * j + 1] == p).flat_map(col).collect();
+        let got = a.place_rows(&[p]);
+        assert_eq!(got.iter().map(|x| x.to_bits()).collect::<Vec<_>>(), want.iter().map(|x| x.to_bits()).collect::<Vec<_>>(), "place {p}");
+    }
+    let all: Vec<u32> = (0..np as u32).collect();
+    assert_eq!(a.place_rows(&all).len(), 7 * rows.len());
+    let at = a.rows_at(&rows);
+    for j in 0..rows.len() {
+        assert_eq!(at[6 * j..6 * j + 6].iter().map(|x| x.to_bits()).collect::<Vec<_>>(), col(j)[1..].iter().map(|x| x.to_bits()).collect::<Vec<_>>());
+    }
+    summary_is_the_table(&a);
+    // T-3509: a world with trips within a place, for the own rows' sums
+    let packs = world_packs();
+    let mut w = IntercityApi::new(&composition(&packs, Some(&rows_json(&packs)))).unwrap();
+    world_lines(&mut w, true, true);
+    solve_all(&mut w);
+    assert!(summary_is_the_table(&w) > 0., "the world has a place's own row");
+}
+/// `table_summary` against the table's columns, to the bit; the own rows' longer trips summed.
+fn summary_is_the_table(a: &IntercityApi) -> f64 {
+    let (rows, rp, rt, rc, rm) = (a.corridor_rows(), a.corridor_rows_pairs(), a.corridor_rows_trips(), a.corridor_rows_commutes(), a.corridor_rows_modes());
+    let np = a.m.places.len();
+    let s = a.table_summary(np as u32);
+    assert_eq!(s[0] as usize, rows.len());
+    let step = |x: f32| if x.is_nan() { f64::NAN } else { ((x as f64).clamp(0., 1.) * 65534.).round() / 65534. };
+    let mut want = vec![0f64; 5 * np];
+    for j in 0..rows.len() {
+        let (x, y) = (rp[2 * j] as usize, rp[2 * j + 1] as usize);
+        if x == y {
+            // T-3509: each place's own row
+            want[3 * np + 2 * x] = rt[j];
+            want[3 * np + 2 * x + 1] = rc.get(j).copied().unwrap_or(0.);
+            continue;
+        }
+        for p in [x, y] {
+            want[3 * p] += rt[j];
+            want[3 * p + 1] += rc.get(j).copied().unwrap_or(0.);
+            want[3 * p + 2] += rt[j] * step(rm[2 * j]);
+        }
+    }
+    assert_eq!(s[2..].iter().map(|x| x.to_bits()).collect::<Vec<_>>(), want.iter().map(|x| x.to_bits()).collect::<Vec<_>>());
+    (0..np).map(|p| want[3 * np + 2 * p]).sum()
+}
 /// T-1008: the corridors sent once (pairs, trips a day) and per period (shares, the pairs with
 /// rail) give `corridor_summary` and `commute_corridors` back.
 #[test]
@@ -829,6 +883,32 @@ fn everyday_pairs_across_a_zone_line() {
     bad[0] = with_everyday(&packs[0], [1000., 100.], false);
     assert!(IntercityApi::new(&composition(&bad, Some(&rows))).is_err());
 }
+/// T-3624: a school outing across a zone line weighs its car twice in the choice: rail takes more of
+/// it than of the same outing as an errand, and the medical visits beside it do not move.
+#[test]
+fn school_outings_weigh_the_car_twice() {
+    let packs = world_packs();
+    let rows = rows_json(&packs);
+    let solved = |kinds: [usize; 2]| {
+        let mut v: serde_json::Value = serde_json::from_str(&with_everyday(&packs[0], [1000., 100.], true)).unwrap();
+        v["everyday_kind"] = serde_json::json!(kinds);
+        let mut e_packs = packs.clone();
+        e_packs[0] = v.to_string();
+        let mut a = IntercityApi::new(&composition(&e_packs, Some(&rows))).unwrap();
+        world_lines(&mut a, true, true);
+        solve_all(&mut a);
+        a
+    };
+    let (errands, school) = (solved([0, 5]), solved([crate::demand::everyday::SCHOOL, 5]));
+    let mut more = false;
+    for q in 0..PERIODS {
+        let (e, s) = (&errands.per(q).unwrap().e_frac, &school.per(q).unwrap().e_frac);
+        assert_eq!(e[1].to_bits(), s[1].to_bits(), "period {q}: the medical visits do not move");
+        assert!(s[0] >= e[0], "period {q}: {} {}", s[0], e[0]);
+        more |= s[0] > e[0] && e[0] > 0.;
+    }
+    assert!(more, "rail takes more of the school outing");
+}
 /// T-1229: the everyday pairs by purpose: in `part_summary` by kind and `everyday_by_place`, in a
 /// selection's blocks (all modes from the market alone, rail and the walkers rail takes from the
 /// network), and in the trip explorer between the two places.
@@ -997,6 +1077,7 @@ fn zone_legs_add_up_to_a_whole_place_selection() {
     let all_q = (1u32 << PERIODS) - 1;
     let etail = 1 + 8 * np + 11 * ng + 4 * np;
     let every = u32::MAX;
+    let mut own = 0f64;
     for place in 0..2usize {
         let g = a.m.groups.iter().find(|g| a.m.zones[a.m.cell_zone[g.lo]].place == place).unwrap();
         let xy: Vec<f32> = (0..g.city.len()).flat_map(|i| [g.city.x[i], g.city.y[i]]).collect();
@@ -1009,9 +1090,13 @@ fn zone_legs_add_up_to_a_whole_place_selection() {
             for end in 0..2 {
                 let sum = |v: &[f64], j: usize| v.chunks_exact(6).map(|c| c[3 * end + j]).sum::<f64>();
                 let (mut want, mut want_rail, mut want_walk) = (0f64, 0f64, 0f64);
-                for p in (0..np).filter(|&p| p != place) {
+                for p in 0..np {
+                    // T-3509: longer trips and commutes with the place's own zones too
                     want += all[1 + 8 * p + 4 * end];
                     want_rail += rail[1 + 8 * p + 4 * end + 1];
+                    if p == place {
+                        own += all[1 + 8 * p + 4 * end];
+                    }
                     let o = 1 + 8 * np + 7 * ng + 4 * p + 2 * end;
                     want += all[o];
                     want_rail += rail[o + 1];
@@ -1035,6 +1120,7 @@ fn zone_legs_add_up_to_a_whole_place_selection() {
             }
         }
     }
+    assert!(own > 0., "the world has longer trips within a place");
     // only the outings: place 0's homes and place 1's activities each count them once
     let q = 1;
     let v = a.everyday_place_legs(q);

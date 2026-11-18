@@ -248,13 +248,23 @@ in two clusters is in neither, its trips fixed in the pack's totals like any oth
 rail path. The market's figures are its parts' added up: rail from each, the trips, pairs and
 corridor trips (which need no network) once. The corridors (place pairs with longer trips or
 commutes) are a table no network or period changes: each pair's places, its longer trips and
-commute legs a day (kept for the rows with any, a few in a thousand), and its shares by plane and by car
-(game/demand.ts `CorridorTable`; place numbers 16-bit while the market has under 65,536 places, T-2485).
-The worker holding period 0's market makes and sends a table once, by its key; after `corridorsAgain`,
-any worker's next result with the market sends it again. Each period's result carries the
-key, the period's factors of the trips and legs and the pairs with rail. A kind of day's corridors
-are the table times the day's scales plus its pairs with rail, so no publish or view walks every
-zone pair (T-789, T-1008). A market zone no station reaches is in no cluster;
+commute legs a day, and its shares by plane and by car. Nobody holds it whole (T-2136: 8.5M rows on
+the New York save, 118 MB on the page and as much again to make in a worker, growing with the square
+of the places). The page has each market's book (game/demand.ts `CorridorBook`: the row count, a
+key over every row, each place's longer trips, commute legs and longer trips by plane with every
+other place, and each place's own row's longer trips and commute legs, which a zone's Trips within
+reads (T-3509, `withinOf`), `IntercityApi.table_summary`), sent once by the worker holding period 0's market (after
+`corridorsAgain`, any worker's next result sends it again); a view that needs one place's or a few
+places' rows (the zone inspector, the city view's selected zone, the trip graph's far end, the trip
+panel's pair, the selection's own modes, achievements) asks every solving worker (`rows`, game/demand.ts
+`rowsOf`), takes the first answer, made from the composition's own figures (`place_rows`), and keeps
+the last 48 asked; the zone in view's and up to 16 built zones' are asked as a market's book comes,
+since a worker solving answers only at its next break (up to 2.5 s on the New York save). Each period's result carries the key, the period's factors of the trips and legs
+and the rows with rail, each with its two places and share by plane. A kind of day's corridors are
+the book times the day's scales plus its rows with rail, so no publish or view walks every zone pair
+(T-789, T-1008). A cached result brings the rows the page held when it was written (the zone in
+view's first, up to 16 places); any other place's wait, as a loading zone's figures do, until a worker
+sends the market's book (`rowsCanCome`). A market zone no station reaches is in no cluster;
 with none reached the market is a cluster of its own with no lines, solved once and kept. Lines and
 stations no population reaches are in no cluster and carry nobody. `?perfOff=split` joins the
 market's zones into one node, as before T-409.
@@ -411,8 +421,13 @@ nothing.
 page sends a solve without the barrier until its final is shown, a newer network (an edit, a zone
 opened or at another level) is held on the page, not sent, and goes the moment that final shows,
 solved locally on top of it. The one gap is those 8 s before `whole`: a network that arrives in them
-goes at once, and one held since before them waits for the final, so edits coming faster than the
-local solve never keep a whole solve from starting. A worker replaced meanwhile still re-solves at
+goes at once. One held since before them (an edit made during the local solve) goes at the local
+result too while the first edit since a whole solve last started was sent at most 60 s before
+(`LOCAL_CHAIN_MS`, T-3616, notes/T-3616.md, `?perfOff=heldLocal` off), and waits for the final after
+that, so edits coming faster than a slow local solve (all of Japan's, about 2 minutes) never keep a
+whole solve from starting. For the first 10 s of the local solve (`HOLD_QUIET_MS`) a network held
+behind it is taken to go at its local result: no zone is refined aside and the time left counts no
+second solve; after that both as for any hold. A worker replaced meanwhile still re-solves at
 once. So building steadily, a whole solve lands about every local solve plus whole solve (a line a
 minute on 2 workers: all of China every 60-90 s, all of Japan every 19-26 minutes), and an edit made during one
 shows its figures when it has landed and the local solve on top is done (the zone in view's sooner, from a

@@ -22,10 +22,10 @@ import { zonesLoaded } from "../game/zones";
 import { chargeShares, lineShares, upkeepShares } from "../game/regionMoney";
 import { GOAL_SHARES, linePoints, STAR_SHARE } from "../game/points";
 import { AVERAGE_DAY, AWAY_DAY, awaySoon, BACK_DAY, DAY_KINDS, OUT_DAY, rushSoon } from "../game/days";
-import { demandByDay, demandView, platformTransfers, roughZones } from "../game/demand";
+import { demandByDay, demandView, marketIn, platformTransfers, roughZones, zoneViews } from "../game/demand";
 import { linesPending } from "../game/lineFigures";
 import { accountVersion, packArrivals, packRiders } from "../game/boarding";
-import { ask, designSpeed, guideFinished, lineDraft, selection, tool } from "../game/ui";
+import { ask, designSpeed, guideFinished, lineDraft, marketOff, selection, tool } from "../game/ui";
 import { flipSites, rightHand, say, setEditSink, world, worldIsRows } from "../game/world";
 import type { LineInput, LineStats, StationInput, TrackEdge, TrackNode, WorldView } from "../game/types";
 import type { ClockLine, ClockState, EditOp, FromClock, NetworkSnapshot, PiInput, RouteAsk, StationAt, ToClock } from "./protocol";
@@ -180,15 +180,21 @@ const lineEdgeIds = new WeakMap<object, number[]>();
 let lastEdgeLineRows: readonly ClockState["lines"][number][] = [];
 let lastEdgeLines = new Map<number, string[]>();
 
+/** T-3474: a line's whole plan, which still lists the lines on each edge (the line tool reroutes over
+ * all of it, not only the part a partly built line runs) */
+function planPathOf(l: ClockState["lines"][number]): number[] {
+  return l.planPath ?? l.path;
+}
+
 /** whether two line rows run over the same edges: the same row, or the same line with the same path */
 function samePaths(a: readonly ClockState["lines"][number][], b: readonly ClockState["lines"][number][]): boolean {
   if (a.length !== b.length) return false;
   for (let i = 0; i < a.length; i++) {
     const x = a[i], y = b[i];
     if (x === y) continue;
-    const xb = x.back ?? [], yb = y.back ?? [];
-    if (x.id !== y.id || x.path.length !== y.path.length || xb.length !== yb.length) return false;
-    for (let k = 0; k < x.path.length; k++) if (x.path[k] !== y.path[k]) return false;
+    const xb = x.back ?? [], yb = y.back ?? [], xp = planPathOf(x), yp = planPathOf(y);
+    if (x.id !== y.id || xp.length !== yp.length || xb.length !== yb.length) return false;
+    for (let k = 0; k < xp.length; k++) if (xp[k] !== yp[k]) return false;
     for (let k = 0; k < xb.length; k++) if (xb[k] !== yb[k]) return false;
   }
   return true;
@@ -209,7 +215,7 @@ function edgesOf(s: ClockState): TrackEdge[] {
       for (const l of s.lines) {
         let ids = lineEdgeIds.get(l);
         // T-3101: a way back that takes other track counts too
-        if (!ids) lineEdgeIds.set(l, ids = [...new Set(l.path.concat(l.back ?? []).map((p) => p >> 1))]);
+        if (!ids) lineEdgeIds.set(l, ids = [...new Set(planPathOf(l).concat(l.back ?? []).map((p) => p >> 1))]);
         const id = String(l.id);
         for (const p of ids) {
           const v = edgeLines.get(p);
@@ -269,6 +275,7 @@ function toWorld(s: ClockState): WorldView {
     let v = lineViews.get(l);
     if (!v) lineViews.set(l, v = {
       id: String(l.id), num: l.id, letter: l.letter || letterOf(l.name), symbol: l.letter, name: l.name, colour: l.colour, stops: l.stops.map(String),
+      ...(l.planStops ? { planStops: l.planStops.map(String), stopStart: l.stopStart ?? 0 } : {}),
       ...(l.group ? { group: l.group, groupName: l.groupName, groupSymbol: l.groupSymbol, groupColour: l.groupColour } : {}),
       tph: { high: l.tph[0], medium: l.tph[1], low: l.tph[2] },
       ...(l.twinOf !== undefined ? { twinOf: String(l.twinOf) } : {}),
@@ -493,6 +500,12 @@ async function ifItFits(src: { bytes: Uint8Array } | { key: string }, then?: () 
 /** T-728: make the game a sandbox, for good. */
 export function makeSandbox() {
   current?.post({ kind: "sandbox" });
+}
+/** T-3707: the page's modded marks (game/modded.ts), told to every clock worker this page starts. */
+let moddedWhy: string[] = [];
+export function postModded(why: string[]) {
+  moddedWhy = why;
+  current?.post({ kind: "modded", why });
 }
 /** T-1822: keep the Getting started card's progress in the save. */
 export function saveGuide(guide: GuideSave) {
@@ -729,6 +742,7 @@ export class ClockClient {
     setHiddenLinesSink((lines) => this.post({ kind: "hideLines", lines }));
     setNewHeadwaySink((seconds) => this.post({ kind: "newHeadway", seconds }));
     current = this;
+    if (moddedWhy.length) this.post({ kind: "modded", why: moddedWhy });
     // The worker settles money from the clock (T-028, T-284): tell it each time the
     // clock is set, paused, resumed or sped up.
     const sendClock = () => this.post({ kind: "clock", t: clock.now(), rate: clock.ticking ? clock.rate() : 0, at: performance.timeOrigin + performance.now(), game: this.game });
@@ -819,7 +833,11 @@ export class ClockClient {
     effect(() => {
       const m = moneyState.value;
       if (!m) return;
-      for (const [id, v] of demandByDay.value[AVERAGE_DAY]?.cities ?? []) {
+      // (T-3509: the trips within the zone, those between its far-apart parts included, so never
+      // from figures before the market's result while the game has one)
+      const d = demandByDay.value[AVERAGE_DAY];
+      if (!marketIn(d) && !marketOff()) return;
+      for (const [id, v] of zoneViews(d)) {
         // (T-1223: never from rough figures, whose noise could cross a mark)
         if (!v.final || roughZones.value.has(id)) continue;
         if (v.split.train >= STAR_SHARE && m.stars?.[id] === undefined) this.post({ kind: "star", zone: id });

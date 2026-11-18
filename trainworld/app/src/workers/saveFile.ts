@@ -20,6 +20,7 @@ import successors from "../game/zone-successors.json";
 import { zoneName } from "../game/zoneNames";
 import { compressGzip, decompressGzip } from "./gzip";
 import { GZIP_DAMAGED } from "./gzipCore";
+import { editOf } from "./versions";
 import type { LineShape } from "../game/lineShape";
 
 export const SAVE_MAGIC = "TWG1";
@@ -71,14 +72,16 @@ export function addEntry(to: Omit<DayLedger, "day">, e: Omit<DayLedger, "day">, 
 
 /** T-3543, T-3588: the headways new lines start with (seconds at high, medium and low demand), by kind of line */
 export type Headways = [number, number, number];
-export type NewHeadways = { rail?: Headways; tram?: Headways; fast?: Headways };
+export type NewHeadways = { rail?: Headways; tram?: Headways; fast?: Headways; bus?: Headways; ferry?: Headways };
+/** The kinds of line a default headway is kept for (T-3703: bus and ferry too) */
+export const NEW_HEADWAY_KINDS = ["rail", "tram", "fast", "bus", "ferry"] as const;
 const isHeadways = (v: unknown): v is Headways => Array.isArray(v) && v.length === 3 && v.every((s) => typeof s === "number" && Number.isFinite(s) && s >= 0);
 /** A header's `newHeadway` read back: the kinds it holds well-formed, none from anything else. */
 export function cleanNewHeadways(v: unknown): NewHeadways {
   const out: NewHeadways = {};
   if (v && typeof v === "object" && !Array.isArray(v)) {
     const o = v as Record<string, unknown>;
-    for (const k of ["rail", "tram", "fast"] as const) if (isHeadways(o[k])) out[k] = [o[k][0], o[k][1], o[k][2]];
+    for (const k of NEW_HEADWAY_KINDS) if (isHeadways(o[k])) out[k] = [o[k][0], o[k][1], o[k][2]];
   }
   return out;
 }
@@ -164,6 +167,9 @@ export interface SaveHeader {
   /** T-3115: the Community share this game is a copy of (game/sharedSave.ts); a copy plays as normal but its
    * figures never reach the leaderboards. Absent for a game of the player's own */
   copy?: string;
+  /** T-3707: why the game is modded (game/modded.ts: a mod's name, "unofficial build", "site:<host>"), every reason
+   * seen, never removed; a modded game's figures never reach the leaderboards. Absent for the published game's */
+  modded?: string[];
 }
 
 /** T-2395: `SaveHeader.home` for all the player's cities (the built area, zoomed out) */
@@ -183,7 +189,7 @@ export interface GuideSave { done: number; hidden?: true; closed?: true; card?: 
 const HEADER_FIELDS: Record<keyof SaveHeader, true> = {
   game: true, format: true, city: true, region: true, cities: true, clock: true, cash: true, loan: true, loanPay: true, loanDays: true, fleet: true, fleetFast: true,
   fleetBus: true, fleetFerry: true, fleetTram: true, fares: true, ledger: true, hours: true, regions: true, lineDays: true, stars: true, goals: true, notes: true, shapes: true, hidden: true, mode: true, start: true,
-  dayShift: true, opened: true, demandFine: true, demandBuilt: true, newCars: true, newHeadway: true, newWeekendShare: true, level: true, guide: true, achievements: true, home: true, copy: true,
+  dayShift: true, opened: true, demandFine: true, demandBuilt: true, newCars: true, newHeadway: true, newWeekendShare: true, level: true, guide: true, achievements: true, home: true, copy: true, modded: true,
 };
 /** T-3115: the header fields, for checking a stranger's save (game/sharedSave.ts) */
 export const SAVE_HEADER_FIELDS: ReadonlySet<string> = new Set(Object.keys(HEADER_FIELDS));
@@ -620,13 +626,19 @@ export async function listSlots(): Promise<SaveSlot[]> {
   }).sort((a, b) => b.at - a.at);
 }
 
+/** T-3611: a write refused because another tab saved the slot since this one last read it. */
+export class SlotTakenError extends Error { constructor() { super("The slot was saved by another tab."); } } // i18n-ignore: internal, never shown
+
 /** Save while preserving a slot's latest name (it may have been renamed elsewhere; `lastName`, the
  * name last seen, where the slot has gone, T-1829) and its origin and latest change when `v` has none
- * (T-2037); true if the slot was not there before. */
-export async function writeSlot(key: string, v: StoredSave, lastName?: string): Promise<boolean> {
+ * (T-2037); true if the slot was not there before. With `seenEdit`, a slot whose latest change is newer
+ * is left as it is and a SlotTakenError thrown (T-3611). */
+export async function writeSlot(key: string, v: StoredSave, lastName?: string, seenEdit?: number): Promise<boolean> {
   const s = await store("readwrite");
   const done = committed(s.transaction);
   const old = await req<StoredSave | undefined>(s.get(key));
+  // T-3611: the slot holds a change this tab never read (another tab saved it): nothing is written
+  if (seenEdit !== undefined && old && editOf(old) > seenEdit) throw new SlotTakenError();
   await req(s.put({ ...v, name: v.name ?? old?.name ?? lastName ?? slotName(key), origin: v.origin ?? old?.origin, edit: v.edit ?? old?.edit }, key));
   await done;
   return !old;

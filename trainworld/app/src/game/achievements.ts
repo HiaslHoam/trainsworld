@@ -10,7 +10,7 @@ import { CITIES, cityById, type CityId } from "./cities";
 import { complexes } from "./complexView";
 import { continentLabel, continentOf } from "./continents";
 import { AVERAGE_DAY, WEEKDAY_LONG } from "./days";
-import { demandByDay, demandUpdating, eachCorridor, lineFiguresIn, roughZones, type Corridors } from "./demand";
+import { demandByDay, demandUpdating, lineFiguresIn, marketIn, roughZones, zoneViews, type Corridors } from "./demand";
 import { bigDistance, clockTime, dayOf, money, speed } from "./format";
 import { t, tCountry, tList, tNumber } from "../i18n";
 import { tPlace } from "../i18n/places";
@@ -18,6 +18,7 @@ import { tPlace } from "../i18n/places";
 import { stationZone } from "./listScope";
 import { playedSeconds, TRAINSFAN_HOURS, trainsfanReached } from "./hoursPlayed";
 import { moneyState } from "./money";
+import { marketOff } from "./ui";
 import { foldTwins, readToday, runningToday, upkeepToday } from "./today";
 import { weekdayOf } from "./days";
 import { stationsById, world } from "./world";
@@ -292,14 +293,16 @@ let corridorMemo: { corr: Corridors; key: string; sums: Map<number, { all: numbe
 function corridorSums(corr: Corridors, places: ReadonlyMap<number, CityId>): Map<number, { all: number; rail: number }> {
   const key = [...places.keys()].sort((a, b) => a - b).join(",");
   if (corridorMemo?.corr === corr && corridorMemo.key === key) return corridorMemo.sums;
+  // T-2136: all trips from the market's book, rail from the rows with rail (summed in another order than the
+  // rows', so equal to theirs within rounding); no rows asked, which on a big save would be millions
   const sums = new Map<number, { all: number; rail: number }>();
-  const add = (p: number, all: number, rail: number) => {
-    if (!places.has(p)) return;
-    const e = sums.get(p) ?? { all: 0, rail: 0 };
-    e.all += all; e.rail += rail;
-    sums.set(p, e);
-  };
-  eachCorridor(corr, (a, b) => a !== b && (places.has(a) || places.has(b)), (j, x) => { add(corr.table.from[j], x.trips, x.rail); add(corr.table.to[j], x.trips, x.rail); });
+  const b = corr.book.totals;
+  for (const p of places.keys()) if (3 * p + 1 < b.length) sums.set(p, { all: b[3 * p] * corr.longerScale + b[3 * p + 1] * corr.commuteScale, rail: 0 });
+  for (let k = 0; k < corr.railAt.length; k++) {
+    const from = corr.railFrom[k], to = corr.railTo[k], r = corr.longerRail[k] + corr.commuteRail[k];
+    if (from === to) continue;
+    for (const p of [from, to]) { const e = sums.get(p); if (e) e.rail += r; }
+  }
   corridorMemo = { corr, key, sums };
   return sums;
 }
@@ -310,7 +313,8 @@ export const demandFigures = computed(() => {
   void zonesLoaded.value;
   const d = demandByDay.value[AVERAGE_DAY];
   const v = d?.view;
-  if (!w || !v?.final) return null;
+  // (T-3509: the zones' trips within wait for the market's result while the game has one)
+  if (!w || !v?.final || (!marketIn(d) && !marketOff())) return null;
   const rough = roughZones.value, byId = w.byId;
   const run = w.running;
   const firsts = new Map<FirstId, Detail>();
@@ -318,7 +322,9 @@ export const demandFigures = computed(() => {
   // coarse, and a total of millions is past the noise the star's rule guards against)
   const built = new Set<CityId>();
   for (const s of w.stations) if (s.built) { const z = stationZone(s); if (z) built.add(z); }
-  const views = [...built].map((id) => d.cities.get(id)).filter((x) => x?.final);
+  // (T-3509: each zone's trips within it, its far-apart parts' longer trips included)
+  const zones = zoneViews(d);
+  const views = [...built].map((id) => zones.get(id)).filter((x) => x?.final);
   const trips = sumModes(views)?.rides.train ?? 0;
   // busiest station, by complex
   const cx = complexes.value;
@@ -358,7 +364,7 @@ export const demandFigures = computed(() => {
     const c = cityById(id);
     if (!c) continue;
     places.set(c.place, id);
-    const cv = d.cities.get(id);
+    const cv = zones.get(id);
     if (cv?.final && !rough.has(id) && cv.split.train >= CITY_SHARE && (!city || cv.split.train > city.v!)) city = { of: c.name, v: cv.split.train };
   }
   const corr = d.intercity?.corridors;
@@ -375,7 +381,7 @@ export const demandFigures = computed(() => {
   const railIn = new Map<string, number>();
   let railEurope = 0;
   for (const id of built) {
-    const c = cityById(id), cv = d.cities.get(id);
+    const c = cityById(id), cv = zones.get(id);
     if (!c?.country || !cv?.final) continue;
     railIn.set(c.country, (railIn.get(c.country) ?? 0) + cv.railTripsPerDay);
     if (continentOf(c.country, c.center[0], c.center[1]) === "Europe") railEurope += cv.railTripsPerDay;

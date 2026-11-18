@@ -21,7 +21,11 @@ Full design, numbers and sources: `notes/T-008.md`.
   share in proportion to their own between two set corners), never a refusal. A curve under the
   minimum radius is refused ("The curve is too tight"). A route starting or ending
   on existing track gets a lead-in PI on that track's heading, so it leaves like a turnout and its
-  first curve starts at the node (it never runs on top of the main line). Track in a save that
+  first curve starts at the node (it never runs on top of the main line). A split needs 5 m of
+  track each side (`SPLIT_ROOM`), so a route end on track within 5 m of a piece's end goes where
+  a click could put it (T-3690, `split_room`): on a plain joint (it becomes the junction), on a
+  bare end the route carries on past, else 5 m in from the node (a junction, a station's node, a
+  bare end the route heads back from). Track in a save that
   keeps the points it was drawn through (T-079) keeps its shape; its first reshape makes those
   points its PIs (auto radius).
 - **Drawing through points** (T-418, T-422; the only way to draw, Anita 2026-10-15): click
@@ -253,10 +257,23 @@ Full design, numbers and sources: `notes/T-008.md`.
   them meet. Each run end votes: a join gives the way trains keep to on that track (the right track
   looking out along the piece carries trains away from the node with right-hand running), a bare track
   end says nothing, and anything else says both ways (a station at a bare end, double track or a crossover end to
-  end, a junction end with no join). A station inside the run, or at a join that counts, says nothing (T-3386). The run runs one way
+  end, a junction end with no join). A station inside the run, or at a join that counts, says nothing (T-3386), but a run
+  with a bare end and a station anywhere on it runs both ways, a terminus branch with a tail past its platform included
+  (T-3647). A game saved before 0.4 (save level 18 or lower), when any station on a run made it two-way, loads with
+  each such run that now takes a way pinned both ways (oneway 3, `Network::pin_station_runs`), so its lines run as
+  they did. The run runs one way
   where its join votes agree (at least one) and nothing says both; otherwise both ways, so a branch to
   a terminus runs both ways and a hand-laid flyover's legs, joined the way their trains come, each one
-  way. The track inspector's "Run trains one way" switch shows the way the piece runs, taken by itself included (hover "Set by the track it joins" then). Switched on it stores the way (the run's own, else 1), off it stores 3 where the run gives a way (pinned both ways) and 0 where it does not; "Use automatic way", shown only where the stored way differs from the run's, stores 0 again; "Reverse direction" turns it
+  way. **Runs that meet where only single track meets** (a leg of a split pair splitting again, as a bypass
+  beside a side platform; any number of tracks) take their way together (T-3672, `run_group`, `group_ways`):
+  trains pass such a junction from the pieces on one side to those on the other, so each run's way fixes the
+  others'; the group runs one way where every end it has elsewhere is a join that counts and all of them send
+  trains that way (an end left unjoined at double track that another of its ends joins at that node says
+  nothing). Otherwise (a bare end or a station at one, an end with no join, joins that disagree, a
+  junction with nothing on one side, ways that contradict round a loop) each run takes its way by its own ends,
+  and those ending at such a junction run both ways. A pre-0.4 save pins such a group whole when a station is
+  on any of it. A line of a loaded save whose path runs against a way its track now takes is moved through its
+  same stops on load (`reroute_against_ways`), as an edit changing a way moves it. The track inspector's "Run trains one way" switch shows the way the piece runs, taken by itself included (hover "Set by the track it joins" then). Switched on it stores the way (the run's own, else 1), off it stores 3 where the run gives a way (pinned both ways) and 0 where it does not; "Use automatic way", shown only where the stored way differs from the run's, stores 0 again; "Reverse direction" turns it
   round (`TrackApi::set_edge_oneway`, free, one undo step, 0 to 3; `edge_oneway` gives the set value,
   `edge_infer` the run's own way, `edge_way` and `oneway_edges` the way, `join_edges` the joins that count);
   it also moves the piece's joins that count to the double track that carries a set way 1 or 2
@@ -273,7 +290,8 @@ Full design, numbers and sources: `notes/T-008.md`.
   edit, because its way back is not on `lines_on_edge`. Setting the flag also moves the **forward** path of
   every line that ran against it, through its same stops (`route_hops_turn`), in the same edit (a Batch);
   the app asks first, listing the lines whose way changes ("{line} takes another way", `oneway_effects`),
-  and the edit is refused (`OneWayNoWay`) when a line has no other way. A line already on its way keeps it.
+  and the edit is refused (`OneWayNoWay`) when a line has no other way. A line already on its way keeps it. A line
+  already broken never refuses it (T-3647), and runs again when the edit gives it a way.
   Splitting a piece keeps the flag on both halves; pieces join only with the same way along the joined
   piece. Capacity: single track that runs one way, set or by its run, is a directed track like double
   (section = `edge_section_s` + v / `SIGNAL_BRAKE`, per direction, `capacity::directed`), not shared.
@@ -934,7 +952,11 @@ and no rider waits longer than at 100%. So the shortest headway a line can have 
 resource's `s`, 1m47s on track at 80 km/h. A count level held this way counts as settled, so
 an edit elsewhere leaves it to the bit, except past full on single track only that line runs over:
 only its own rate can do that (a lone train's, which keeps no margin, when a second comes), so it is
-cut to the stretch (T-3526).
+cut to the stretch (T-3526). Nor is a line the edit changed at a level where it ran no trains before
+(a new line, one an undo brings back, one given trains there): no fill has given it a share, so it
+steps with the lines already filling the track until its rate moves less than 0.01 trains an hour
+a round, on weekdays and weekends alike, and takes its share at the edit rather than 0 until some later
+edit nearby (T-3482).
 
 **Settled in the clock worker before demand runs.** Whole-line train allocations derive their
 frequencies from capacity-adjusted round trips with a bounded, damped solve on edits (T-104).
@@ -943,9 +965,10 @@ delays on resources used by count schedules. Each level settles on its own (leve
 capacity): a level whose fleets already match their counts within 0.0001 trains is not stepped,
 so its rates and run times stay the same to the bit (T-415). On an edit, a line within 0.0001
 trains of its fleet is left as it is while the rest of its level steps (T-1787: on shared track
-each line moved re-times its neighbours), and only lines that share track with what the edit changed,
-directly or through others, are stepped at all: the rest keep their rates and run times to the bit
-(T-1863). The step's 1% probe reads each round trip's rise
+each line moved re-times its neighbours), and only the lines the edit changed and those that share
+track with them, directly or through others, are stepped at all: the rest keep their rates and run
+times to the bit (T-1863). A bus or ferry line shares no track, so it is stepped exactly when its own
+counts or headways change (T-3704). The step's 1% probe reads each round trip's rise
 from the capacity solve alone, as the change in the line's hold delays, so the run profiles are
 worked out once a round instead of twice. A save carries the settled rates to the bit, so a load
 settles from them with an edit's settle and changes nothing; a save without them (older ones, or
@@ -1077,8 +1100,10 @@ line panel's round-trip split, waiting at busy track among it: [ui-inspectors.md
   one-way single track (both its pieces single and one way; a one-track station on double track is none) is a
   one-way station. A line stopping at one is served there once a round trip, by the run whose track passes it, where
   that run passes it; the other run goes by on its own track, neither turning back nor looping to reach it. Routing
-  skips the one-way stations on the other run's track (`route_legs`, first in `route_hops`); one neither run's track
-  passes is routed through as any stop. The other run keeps the stop in its per-stop arrays as a pass (`run.pass`,
+  skips the one-way stations on the other run's track (`route_legs`, first in `route_hops`). One that neither run's
+  quickest route through the other stops passes (faster track beside its leg, as passing tracks between two side
+  platforms) is taken by the run that can reach it without turning back more often (T-3651, `leg_run`, `take_legs`);
+  one no run can take that way is routed through as any stop. The other run keeps the stop in its per-stop arrays as a pass (`run.pass`,
   `Run::away`; placed at its path's node nearest the station; no dwell, no riders, no departures there). A one-way
   station's place in the stop list comes from the track, never from click order: the line's other stops are a
   skeleton in the line's order (a click puts a new one where `best_slot` puts it), its one-way stations a set, each
@@ -1300,7 +1325,8 @@ line panel's round-trip split, waiting at busy track among it: [ui-inspectors.md
   the headways; switching to headways starts from the headway the current trains give. Switching
   either way buys and sells no train: that edit keeps the line's counts as they stand (T-752),
   except at a level with no trains, which takes its headway's count (T-849: a new line set
-  straight to headways runs). Saved in a
+  straight to headways runs), following its round trip and trimmed of the trains full track
+  leaves waiting as any headway line's (T-3482). Saved in a
   trailing `LAU1` block of the track save (line index and three headways, only when a line has
   them); a save without it loads every line by hand.
 - **Departures** (`Service::run_deps`): per stretch of one level (consecutive periods at the same
@@ -1526,9 +1552,17 @@ money: it pays, and the cash may go below zero (the cash is not shown; docs/ui-p
   there: all of it, what one line still lacks (the line panel shows its price), one stretch of
   track, or one station. Only constructed track carries trains. Lines can be planned over
   blueprint track: they show their stop times, and run (load capacity, have trains, count for
-  demand) once every edge and stop they use is constructed, so a line drawn over constructed
-  track runs as soon as it has trains; Construct with nothing left to build is refused with the
-  issue `NothingToConstruct` (T-849). A junction is paid when its third
+  demand) over what of them is constructed (below), all of it once every edge and stop they use
+  is, so a line drawn over constructed track runs as soon as it has trains; Construct with nothing
+  left to build is refused with the issue `NothingToConstruct` (T-849).
+  **A partly built line** (T-3474, from CinnamonVII's PR 21; `Network::line_stretch`) runs the
+  longest stretch of its plan whose consecutive stops are constructed, joined by constructed track,
+  with a constructed way back (ties to more stops, then the earlier stretch); its trains turn back at
+  that stretch's end stations as at any line end, and its service, capacity, demand, upkeep share and
+  cars are that stretch's, as a line planned over it alone. An unbuilt station cuts the stretch there. A
+  loop's built arc is an open line, run both ways, until the loop is whole. With no two stops so joined
+  the whole plan stays a preview. The rest of the plan stays the line's: stop edits, Construct and its
+  price, and the line tool work on all of it, and the map draws it faded. A junction is paid when its third
   edge is constructed, a flat crossing when its second is.
   **Rebuilding constructed track** (T-3059, Anita 2026-11-10; `rebuild_pieces`, `rebuild_quote` in `wasm/rebuild.rs`):
   constructed edges and stations change level (as `set_edges_level` does for blueprint) and double track changes
@@ -1773,7 +1807,8 @@ is over `FARE_MAX`, curve US$1,000 (T-3303: a typed 90 billion once went into ev
   groups weigh the same fares (`IntercityApi::fare_col`). Fare income takes the rate times it on
   that line's passenger-km. **Transfer fare** [T-1801]: `Fares.transfer` (curve units, absent for
   $0, saved in the header; an older save loads with none) is paid on each boarding after a trip's
-  first, times the trip's country's scale, in route choice and mode choice (docs/demand-mode.md)
+  first, never above the base fare (T-3689: `transferFare` holds it at read, and a lowered base, a typed fare and a
+  loaded save bring the stored one down; a base of 0 leaves none), times the trip's country's scale, in route choice and mode choice (docs/demand-mode.md)
   and in fare income on the line boarded after the change (`fare_extra`, so inside `LineDemand.fareX`);
   the regional market's trips change free. Fare income is the first stretch's base on
   each of demand's trips and its rate on their passenger-km per period, plus demand's extra on the
@@ -1817,12 +1852,21 @@ is over `FARE_MAX`, curve US$1,000 (T-3303: a typed 90 billion once went into ev
   region's stations, so a region's day is exact and the hour follows its boardings (a region whose
   riders all board at another region's stations scores no trips). Passenger-km are each line's
   period loads times its stretches' lengths, carried by the period's boardings onto the line
-  (each boarding the line's average km), so they count where riders get on. The main thread sends
+  (each boarding the line's average km), so they count where riders get on. **Cover** (T-3657,
+  `lineCover`): each line's points are times its fare income on the forecast weekday over its running
+  cost that day (the trains, buses or boats it runs at the service its riders were solved with, as the
+  line's money chart counts it; upkeep not included), at most 1, and 1 for a line with no running
+  cost; a quad-track line and its hidden twin take the pair's together. A trip's points sit on its
+  boardings, so each leg takes its own line's cover (a free feeder costs the paying line it feeds
+  nothing), and free fares cannot raise a score. The same weekday cover scales every kind of day's
+  points. A region whose lines all have a cover of 0 shows 0 (not the past 24 hours), and a game
+  whose riders earn points before cover sends a 0 to the boards like any other score. The main thread sends
   each line's points per game hour by region, kind of day and period; the worker settles them as
   fares land (each line at its local period), into a `points` figure in every day and hour entry
   (saved with the ledgers; older entries read as 0). A region's points are the sum of its last 24
   closed hour entries; the Cities list shows them, the top bar's city name in its hover.
-- **Stars** (T-685): a region earns a star the first time a final solve's train share for it, on
+- **Stars** (T-685): a region earns a star the first time a final solve's train share for it (of
+  its Trips within: its local trips and the market's between its own far-apart parts, T-3509), on
   the average day (the top bar's goal number as it shows by default; never the weekday or weekend
   view, so switching the day shown earns nothing), reaches 10%. The header keeps the game second it was
   earned (`stars`), and it stays if the share falls. The star is the first of a region's goals,
@@ -2113,7 +2157,7 @@ demand level), trips, the boarding account and the fare curve; a bus is one 12 m
 - **Money**: US$1M a road-km, paid on Construct with US$0.6M a bus, a fleet of its own with spares
   shared between bus lines; running US$6 a bus-km and upkeep US$30 a road-km a day (real figures,
   `ECONOMY` times in the game). Removing or redrawing a constructed route is final and refunds
-  nothing. A new bus line starts at a bus every 8, 15 and 30 minutes by level (Anita, 2026-11-09), 30 s dwell at
+  nothing. A new bus line starts at a bus every 8, 15 and 30 minutes by level (Anita, 2026-11-09; the bus default for new lines instead once set, T-3703), 30 s dwell at
   train stations and 120 s turnaround (`NEW_LINE` in app/src/game/newLine.ts, the one place for what a new
   line of each mode starts with). A copy is planned.
 - **Loops** (T-2899; `bus::is_closed`): a route of four points or more whose last point is its first is a loop.
@@ -2219,7 +2263,7 @@ ports stations, a boat two cars). Code: `track/ferry.rs`, exports `wasm/ferry.rs
   times in the game). The route is free, and redrawing it is free; removing a ferry line leaves its
   ports and is undoable. The Construct quote lists ports as kind 12, boats as kind 13 and the route's
   metres (free) as kind 14. A new ferry line starts at a boat every 20, 30 and 60 minutes at high, medium
-  and low demand (T-2273, T-3400), 60 s dwell, 300 s
+  and low demand (T-2273, T-3400; the ferry default for new lines instead once set, T-3703), 60 s dwell, 300 s
   turnaround (`NEW_LINE.ferry` in app/src/game/newLine.ts, which the app passes).
 - **Loops** (T-2899; `ferry::is_closed`): a line of four stops or more whose last port is its first is a loop,
   as for a bus line (6.7): a circle in the service, one way unless set both ways (T-2981). The route runs from the first

@@ -1,6 +1,7 @@
 // T-3269, T-3279: a player's flag after their name (leaderboard rows, Community cards), and the account panel's flag
 // button beside the display name, which opens the picker.
 
+import { FindInput } from "./FindInput";
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "preact/hooks";
 import { boardSetting } from "../game/account";
 import { flagCountry, flagGroups, flagName, flagUrl, flagsOn, homeCountry, isFlag, setFlag } from "../game/flags";
@@ -13,7 +14,7 @@ import "./flag.css";
 export function Flag({ code, small }: { code?: string | null; small?: boolean }) {
   if (!isFlag(code)) return null;
   const name = flagName(code);
-  return <img class={"flag" + (small ? " small" : "")} src={flagUrl(code)} alt={name} data-tip={name} loading="lazy" decoding="async" />;
+  return <img key={code} class={"flag" + (small ? " small" : "")} src={flagUrl(code)} alt={name} data-tip={name} loading="lazy" decoding="async" />;
 }
 
 /** A name with its flag after it; a long name is cut short, the flag never. */
@@ -120,7 +121,7 @@ function FlagPicker({ anchor, current, onPick, onClose }: { anchor: { current: H
   };
   if (!at) return null;
   return <div class="flag-pop" ref={box} style={{ left: `${at.left}px`, top: at.top === undefined ? "auto" : `${at.top}px`, bottom: at.bottom === undefined ? "auto" : `${at.bottom}px`, maxHeight: `${at.height}px` }}>
-    <input type="text" ref={input} class="new-game-find" aria-label={t("accountPanel.flag")} placeholder={t("accountPanel.flagSearch")} maxLength={40}
+    <FindInput type="text" inputRef={input} class="new-game-find" onClear={() => { setText(""); setCursor(0); }} aria-label={t("accountPanel.flag")} placeholder={t("accountPanel.flagSearch")} maxLength={40}
       value={text} autocomplete="off" spellcheck={false}
       onInput={(e) => { setText((e.target as HTMLInputElement).value); setCursor(0); if (list.current) list.current.scrollTop = 0; }}
       onKeyDown={(e) => {
@@ -130,7 +131,7 @@ function FlagPicker({ anchor, current, onPick, onClose }: { anchor: { current: H
       }} />
     <ul role="listbox" ref={list}>
       {items.map(({ code, gap }, i) => (
-        <li role="option" aria-selected={i === cursor} class={(i === cursor ? "on" : "") + (code === current ? " picked" : "") + (gap ? " gap" : "")}
+        <li key={`${code}:${i}`} role="option" aria-selected={i === cursor} class={(i === cursor ? "on" : "") + (code === current ? " picked" : "") + (gap ? " gap" : "")}
           onMouseDown={(e) => { e.preventDefault(); onPick(code); }}>
           {code ? <img class="flag" src={flagUrl(code)} alt="" loading="lazy" decoding="async" /> : <span class="flag flag-none" />}
           <span class="flag-pop-name">{code ? flagName(code) : t("accountPanel.noFlag")}</span>

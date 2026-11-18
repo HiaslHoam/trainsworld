@@ -249,6 +249,40 @@ fn upkeep_of_a_ten_km_line_and_its_shares() {
     assert!((s[s.len() - 1] - 1.5).abs() < 1e-3 && (s.chunks(2).map(|c| c[1]).sum::<f64>() - 3.2).abs() < 1e-3, "{s:?}");
 }
 
+/// T-3474: a line running part of its plan shares the upkeep of that part only; the built track and
+/// stations past an unbuilt station in its plan go to the rest.
+#[test]
+fn a_partly_built_line_pays_upkeep_on_the_part_it_runs() {
+    let mut a = api();
+    a.set_cash(1e6);
+    let mut st = vec![];
+    for i in 0..10 {
+        let from = if i == 0 { [0.0, 0.0, 0.0, 0.0, -1.0] } else { [1.0, st[i] as f64, 0.0, 0.0, 0.0] };
+        let ends: Vec<f64> = from.iter().chain([0.0, 0.0, (i + 1) as f64 * 1000.0, 0.0, -1.0].iter()).copied().collect();
+        assert_eq!(a.add_route(&ends, &[], 2, false), 0, "{}", a.issues());
+        if i == 0 {
+            st.push(a.nodes_info()[0] as u32);
+        }
+        st.push(a.route_end());
+    }
+    for (i, &n) in st.iter().enumerate() {
+        assert_eq!(a.add_station(1, n, 0.0, 0.0, 120, format!("S{i}")), 0, "{}", a.issues());
+    }
+    let l = a.new_line_id();
+    assert_eq!(a.set_line(l, &st, 6.0, 4.0, 2.0, 30.0, 180.0, 0, 0xd7263d, "L1".into()), 0, "{}", a.issues());
+    assert_eq!(a.construct_all(), 0, "{}", a.issues());
+    // S5 back to blueprint: S0-S4 and S6-S10 tie at 4 km and five stops, and the earlier runs
+    let mut s5 = a.w.net.station_data(st[5]).unwrap();
+    s5.built = false;
+    a.w.apply(Op::Station { node: st[5], data: Some(s5) }).unwrap();
+    assert_eq!(a.line_part(l), vec![0, 5, 0, 4]);
+    assert_eq!(a.line_run_stops(l), st[..5].to_vec());
+    // 10 km at $100k and 10 built underground stations at $200k a day; the line's part is 4 km and 5 stations
+    let s = a.line_upkeep(&[8.0, 10.0, 6.0]);
+    let share = |l: f64| s.chunks(2).find(|c| c[0] == l).map_or(0.0, |c| c[1]);
+    assert!((share(l as f64) - 1.4).abs() < 1e-3 && (share(-1.0) - 1.6).abs() < 1e-3, "{s:?}");
+}
+
 #[test]
 fn an_express_added_over_constructed_track_runs() {
     // T-849: five stations 10 km apart, an all-stops line constructed, then an express
@@ -3310,6 +3344,53 @@ fn removing_past_a_station_stops_at_its_platform_end() {
     }
 }
 
+/// T-3648: a set removed in one edit leaves the track that removing its pieces one by one leaves.
+#[test]
+fn removing_a_set_leaves_what_one_by_one_leaves() {
+    for (built, xs) in [(false, vec![2000.0]), (true, vec![2000.0]), (false, vec![1000.0, 3000.0]), (true, vec![1000.0, 3000.0])] {
+        let setup = || {
+            let mut a = api();
+            a.set_cash(1e6);
+            let ends: Vec<f64> = free(0.0, 0.0).iter().chain(free(4000.0, 0.0).iter()).copied().collect();
+            assert_eq!(a.add_route(&ends, &[], 2, false), 0, "{}", a.issues());
+            for &x in &xs {
+                let e = (0..a.w.net.edge_count() as u32).find(|&e| {
+                    let n = &a.w.net;
+                    n.edge_ok(e) && n.node_x[n.edge_a[e as usize] as usize] < x && n.node_x[n.edge_b[e as usize] as usize] > x
+                }).unwrap();
+                assert_eq!(a.add_station(2, e, x, 0.0, 200, format!("S{x}")), 0, "{}", a.issues());
+            }
+            if built {
+                assert_eq!(a.construct_all(), 0, "{}", a.issues());
+            }
+            a
+        };
+        // what is left: each piece's x span and length, sorted
+        let left = |t: &TrackApi| -> Vec<(i64, i64)> {
+            let n = &t.w.net;
+            let mut v: Vec<(i64, i64)> = live_edges(t).into_iter().map(|e| {
+                let (xa, xb) = (n.node_x[n.edge_a[e as usize] as usize], n.node_x[n.edge_b[e as usize] as usize]);
+                (xa.min(xb).round() as i64, xa.max(xb).round() as i64)
+            }).collect();
+            v.sort();
+            v
+        };
+        let mut a = setup();
+        let ids = live_edges(&a);
+        assert_eq!(a.delete_pieces(&ids, &[]), 0, "{}", a.issues());
+        let set = left(&a);
+        let mut b = setup();
+        for e in live_edges(&b) {
+            if b.w.net.edge_ok(e) {
+                b.delete_edge(e);
+            }
+        }
+        // the pieces not yet touched are gone by id; the one-by-one run may keep what a trim left
+        let one = left(&b);
+        assert_eq!(set, one, "built {built}, stations {xs:?}");
+    }
+}
+
 /// T-1667: track drawn on from a station at a dead end, at either end of its edge, leaves the
 /// platform where it was: the station's node moves back to the platform's middle, keeping its id
 /// and its line, and the new track starts from the old end.
@@ -3772,4 +3853,48 @@ fn a_station_near_a_bare_end_goes_on_the_end_and_a_junction_still_refuses() {
     let e = edge_under(&a, 500.0, 0.0);
     assert_ne!(a.add_station(2, e, 998.0, 0.0, 100, "J".into()), 0);
     assert!(a.issue_kinds().contains("SplitPoint"), "{}", a.issue_kinds());
+}
+
+/// T-3690: a route ending on track within a split's 5 m of a piece's end goes where a click could put it: on a
+/// plain joint, on a bare end it carries on past, else split 5 m in (a junction, a bare end it heads back from).
+#[test]
+fn a_route_end_near_a_piece_end_goes_on_the_joint_or_slides_in() {
+    let node_at = |a: &TrackApi, x: f64, y: f64| (0..a.w.net.node_count() as u32).find(|&n| a.w.net.node_ok(n) && (a.w.net.node_x[n as usize] - x).abs() < 0.5 && (a.w.net.node_y[n as usize] - y).abs() < 0.5);
+    let on = |a: &TrackApi, x: f64| vec![2.0, edge_under(a, x, 0.0) as f64, x, 0.0, 0.0];
+    let route = |a: &mut TrackApi, from: Vec<f64>, to: Vec<f64>| {
+        let ends: Vec<f64> = from.into_iter().chain(to).collect();
+        a.add_route(&ends, &[], 2, false)
+    };
+    let mut a = api();
+    let end = piece(&mut a, Err((0.0, 0.0, 0)), &[], (1000.0, 0.0, 0));
+    piece(&mut a, Ok(end), &[], (2000.0, 0.0, 0));
+    let joint = node_at(&a, 1000.0, 0.0).unwrap();
+    assert_eq!(a.w.net.node_ports[joint as usize].n, 2);
+    // a junction at 500
+    assert_eq!({ let p = on(&a, 500.0); route(&mut a, p, free_at(900.0, -300.0, 0)) }, 0, "{}", a.issues());
+    let junction = node_at(&a, 500.0, 0.0).unwrap();
+    let live = |a: &TrackApi| (0..a.w.net.node_count() as u32).filter(|&n| a.w.net.node_ok(n)).count();
+    let nodes = live(&a);
+
+    // 3 m from the joint, from either piece and as either end: the joint is the junction
+    for (x, rev) in [(997.0, false), (1003.0, false), (997.0, true)] {
+        let (p, q) = (on(&a, x), free_at(x + 300.0, 200.0, 0));
+        assert_eq!(if rev { route(&mut a, q, p) } else { route(&mut a, p, q) }, 0, "at {x}: {}", a.issues());
+        assert_eq!(a.w.net.node_ports[joint as usize].n, 3, "at {x}");
+        assert!(node_at(&a, x, 0.0).is_none());
+        assert_eq!(a.undo(), 0);
+    }
+    // 3 m from the junction: a new junction 5 m from it, the old one as it was
+    assert_eq!({ let p = on(&a, 503.0); route(&mut a, p, free_at(800.0, 250.0, 0)) }, 0, "{}", a.issues());
+    assert_eq!(a.w.net.node_ports[junction as usize].n, 3);
+    assert!(node_at(&a, 505.1, 0.0).is_some());
+    assert_eq!(a.undo(), 0);
+    // 3 m from the bare end: heading back along the track, a junction 5 m in; on past the end, from the end
+    assert_eq!({ let p = on(&a, 3.0); route(&mut a, p, free_at(300.0, 150.0, 0)) }, 0, "{}", a.issues());
+    assert!(node_at(&a, 5.1, 0.0).is_some());
+    assert_eq!(a.undo(), 0);
+    assert_eq!({ let p = on(&a, 3.0); route(&mut a, p, free_at(-300.0, 50.0, 0)) }, 0, "{}", a.issues());
+    assert_eq!(a.w.net.node_ports[node_at(&a, 0.0, 0.0).unwrap() as usize].n, 2);
+    assert_eq!(a.undo(), 0);
+    assert_eq!(live(&a), nodes);
 }

@@ -165,7 +165,7 @@ the map's other controls', and the level buttons' numbers 15 px (also in the pho
 
 [T-2284; `MapToolBar` in `ui/ToolBar.tsx`, `ui/ToolNotes.tsx`, `CLICK_MODE_COLOURS` in
 `game/palette.ts`; design notes/T-2267.md 3.7] Each click mode but plain selecting has its own
-colour: track `#0a819d`, station `#8d71b1`, delete `#d63f73`, select tool `#9c7b31`, bus `#a09e2d`,
+colour: track `#0a819d` (regular; high speed `#5a5fc8`, tram `#c0603a`, `TRACK_TYPE_COLOURS`, T-3693), station `#8d71b1`, delete `#d63f73`, select tool `#9c7b31`, bus `#a09e2d`,
 ferry `#16716f`, line stops the edited line's own colour (kept legible on the shade, `legibleOn`; `#d777ed`
 while no line is picked yet), trip explorer `#268769`, station building `#a15b7b`, passage
 `#b0866a`, the same in both shades (chosen 11 or more CIEDE2000 from every colour the game draws).
@@ -181,6 +181,13 @@ while no line is picked yet), trip explorer `#268769`, station building `#a15b7b
   stop editing and station building tools' rows are their descriptors, the square before their words
   ("New bus line: 3 points" with Cancel and Make line, and so on). Esc places a new bus or ferry line of
   two points or more, as it ends a chain of track; on an edit of a built one it drops the edit (T-2924).
+- **Track type and count** [T-3693, T-3714; `game/buildMode.ts`, `trackCountIcon` in
+  `map/trackTagRows.ts`, `map/quadPairs.ts`]: the track tool's aura and square take the track type's colour, and
+  its placing tag starts the elevation row with the count buttons' icon (1, 2 or 4 strokes) in that colour. The
+  hover tag over track or a rail line on it puts the same icon, in the type's colour, before the level
+  chip on its row (no extra row, no words); quad is a double edge with a twin pair alongside, found by its drawn points (about
+  8 m off). Nothing on the map changes with the type or count (Anita 2026-11-18: no halos or rings round the
+  ghost or a selected or hovered line or track, no mark by the pointer).
 
 ## Building by touch
 
@@ -742,7 +749,7 @@ changing by any route, and a delete's late reply does not draw it again under an
 `clearDelHover` in `map/tools.ts`]. The track under a station takes the station [T-2412; `stationUnder` in
 `map/tools.ts`]: the pointer snapped to its node, or on its platform's stretch of track (half the platform
 and 4 m either side, all of a terminus's), rings and removes the station, with its own question, and the track stays; not
-zoomed out where stations are hidden. A station's short end piece [T-2797; `stationStub` in `game/remove.ts`, `holds_station` in the track
+zoomed out where stations are hidden; track under the station's box that does not touch its node (a siding) is the delete tool's pick instead [T-3629]. A station's short end piece [T-2797; `stationStub` in `game/remove.ts`, `holds_station` in the track
 model], from the station to a bare end and at most 11 m past the platform, also takes the station under the delete tool, bare end included, since
 removing that piece would only lay it back; zoomed out, or from the track inspector or the Select tool's Remove with only such pieces picked, it is refused
 ("A station needs this track. Remove the station first."). **Keys** [T-2797]: with the Select tool's pick, Delete or Backspace removes it; with track or a station selected and no tool on,
@@ -984,6 +991,24 @@ is the pan and Shift+drag is MapLibre's zoom box, so a box needs a mode.
   (below) for a pick of this one piece and no stations: the same choices (picking what the piece has drops the
   choice), quote, hover, question, price and notice, through the same code (`rebuildPieces` in `game/rebuild.ts`),
   and final like it. Greyed Rebuild has no hover.
+- **Several pieces in the track inspector** [T-3634; `game/trackSet.ts`, `TracksInspector` in
+  `ui/inspector/TrackInspector.tsx`]: with built track selected (one piece or a set), Shift+click on built track that
+  is not a crossover adds the piece, a line on it or not, and Shift+click on a piece in the set takes it out; a set of
+  one is the plain track inspector again, and a plain click selects as always. Any other track Shift+clicked leaves
+  the set as it is; Shift+click with anything else selected does what it did. A Shift press on track then is a
+  click, so MapLibre's Shift+drag zoom starts only off track. The set is the selection (`{ kind: "tracks" }`), apart
+  from the Select tool's pick, whose Shift+click adds the way between. Its inspector is titled "3 pieces of track",
+  with the total length, the kind when all share it and the level or range under it; then the rebuild choices with
+  every level and every type offered, as on the bar, the set's own level, count and type on when all share it;
+  Rebuild and the Select tool line; Cost to construct and Upkeep summed; the lines on any of them. Remove track (T-3638) beside Rebuild, and the Delete key, remove the set
+  as the bar's Remove does a pick (`removeTracks` in `game/remove.ts`, edit `removePieces`): one question naming the
+  total length (as for one piece, built and final), lines that lose a stop listed, the whole set refused with the
+  track model's reason when a piece cannot go, the set deselected after. Touch has no way to build a set.
+  Rebuild is the bar's for a pick of these pieces and no stations: one quote, question and charge for all, final;
+  the pieces it would refuse are red on the map and the ramps beyond in the band, as for the bar (one piece's panel
+  draws its quote that way too). The set is drawn in the pick's band; pieces gone after an edit drop out of it.
+  Hover tags carry the gesture (none on a touch screen): one built piece's title "Shift+click more track to rebuild
+  it together", a set's "Shift+click track to add it or take it out".
 - **On a crossover's diagonal** [T-391] the track inspector is titled "Crossover" and drops the
   elevation controls; it shows the slowest curve, the price of both diagonals, Construct
   (builds both) and Remove crossover.

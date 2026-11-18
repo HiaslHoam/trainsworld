@@ -16,8 +16,8 @@ import { t, tDate } from "../i18n";
 import { accountList } from "./accountGames";
 import { playedText } from "./gameTime";
 
-/** T-3132: Random, Biggest (`top`, by points) and Most liked */
-export type ShareView = "random" | "top" | "liked";
+/** T-3132: Random, Biggest (`top`, by points) and Most liked; T-3652: Newest, shown only when the server says it has it */
+export type ShareView = "random" | "newest" | "top" | "liked";
 export type ReportReason = "offensive" | "fake-score" | "other";
 
 export interface ShareRow {
@@ -63,6 +63,35 @@ export const linkedShare = signal<string | null>((() => {
 // Community opens on the linked share once the server says Community is there (preview: on a `?community` page only).
 effect(() => { if (linkedShare.value && communityOn()) communityOpen.value = true; });
 
+/** T-3685: the share the game in hand was opened from (T-3257's view), for a like button on the map. It lasts while the
+ * network is unsaved and, once saved from the view, while that slot is the game in hand; any other game ends it. The
+ * reload into a view carries it in sessionStorage. */
+const VIEWED_KEY = "tw.community.viewed";
+export const viewedShare = signal<{ id: string; seen: boolean; name: string; slot: string } | null>((() => {
+  try {
+    const id = sessionStorage.getItem(VIEWED_KEY);
+    sessionStorage.removeItem(VIEWED_KEY);
+    return id && SHARE_ID.test(id) ? { id, seen: false, name: "", slot: "" } : null;
+  } catch { return null; }
+})());
+/** that share's card as the server has it: its likes, and whether this player liked it */
+export const viewedRow = signal<ShareRow | null>(null);
+effect(() => {
+  const v = viewedShare.value, s = saveSlotsState.value;
+  if (!v) return;
+  if (s.viewing) { try { sessionStorage.removeItem(VIEWED_KEY); } catch { /* none */ } if (!v.seen || v.name !== s.viewing.name) viewedShare.value = { ...v, seen: true, name: s.viewing.name }; return; }
+  if (!v.seen) return;
+  const saved = v.slot ? null : s.slots.find((x) => x.key === s.active && x.name === v.name);
+  if (saved) viewedShare.value = { ...v, slot: saved.key };
+  else if (!v.slot || v.slot !== s.active) viewedShare.value = null;
+});
+effect(() => {
+  const id = viewedShare.value?.id, live = communityOn(), who = session.value;
+  if (!id || !live) { viewedRow.value = null; return; }
+  void who;
+  fetchShare(id).then((r) => { if (viewedShare.peek()?.id === id) viewedRow.value = r; }, () => { viewedRow.value = null; });
+});
+
 /** A share's link: this page's address and the share, and in preview the flag that shows Community. */
 export function shareLink(id: string): string {
   return `${location.origin}${location.pathname}?share=${id}${accountConfig.peek()?.trainworldCommunity === true ? "" : "&community"}`;
@@ -90,8 +119,12 @@ export async function openSharedView(row: ShareRow, name: string): Promise<strin
     if (err.status === 429) return t("community.errBusy");
     return err.message;
   }
-  try { return await openView(bytes, name); }
-  catch { return t("community.errCopyBad"); }
+  const before = viewedShare.peek();
+  viewedShare.value = { id: row.id, seen: false, name: "", slot: "" };
+  try { sessionStorage.setItem(VIEWED_KEY, row.id); } catch { /* the button then waits for a game opened without a reload */ }
+  const undo = () => { viewedShare.value = before; try { sessionStorage.removeItem(VIEWED_KEY); } catch { /* none */ } };
+  try { const why = await openView(bytes, name); if (why !== "") undo(); return why; }
+  catch { undo(); return t("community.errCopyBad"); }
 }
 
 /** What went wrong, in plain words, for each of the server's codes. */
@@ -187,12 +220,13 @@ export async function shareGame(name: string, copy: boolean, title: string): Pro
     if (!got) throw new Error(t("community.errDraw"));
     const blob = await packShared(got.d, got.names);
     if (!blob) throw new Error(t("community.errTooBig"));
-    let save: Uint8Array | null = null;
+    let save: Uint8Array | "big" | null = null;
     if (copy) {
       const bytes = await exportForShare();
       if (!bytes) throw new Error(t("community.errSend"));
       save = await forShare(bytes);
-      if (!save) throw new Error(bytes.length > MAX_SHARED_SAVE ? t("community.errTooBig") : t("community.errSend"));
+      if (save === "big") throw new Error(t("community.errTooBig"));
+      if (!save) throw new Error(t("community.errSend"));
     }
     sharePhase.value = "sending";
     // T-3114: the card counts what the saves list counts, every line and station, bus and ferry ones too
@@ -226,6 +260,7 @@ export async function stopSharing(id: string): Promise<void> {
 /** T-3402: the server's Random list takes an `offset`, so every game is on some page */
 export const communityPagesOn = () => accountConfig.value?.trainworldCommunityPages === true;
 export const communitySearchOn = () => accountConfig.value?.trainworldCommunitySearch === true;
+export const communityNewestOn = () => accountConfig.value?.trainworldCommunityNewest === true;
 /** the longest search the server takes */
 export const SEARCH_MAX = 40;
 
@@ -242,16 +277,51 @@ export const newSeed = () => Math.random().toString(36).slice(2, 12);
 /** decoded drawings, the newest kept; each row's URL changes with its rev */
 const cache = new Map<string, Promise<DecodedShare>>();
 const CACHE_SIZE = 60;
+// T-3680: the server answers 429 past 60 drawings at once and 4 more a second, and a page is 12, so a few tab
+// switches or shuffles in a row tripped it for about half the cards. Drawings are asked for four at a time, a 429
+// holds the queue for a second, and a card nobody shows any more drops out of the queue unasked.
+interface DrawingJob { key: string; row: { id: string; rev: number }; refs: number; tries: number; resolve: (s: DecodedShare) => void; reject: (e: unknown) => void }
+const DRAWINGS_AT_ONCE = 4, DRAWING_TRIES = 10, DRAWING_HOLD_MS = 1000;
+const waiting: DrawingJob[] = [], pending = new Map<string, DrawingJob>();
+let drawingsActive = 0, drawingsHeldUntil = 0, drawingTimer: ReturnType<typeof setTimeout> | undefined;
+function pumpDrawings() {
+  while (drawingsActive < DRAWINGS_AT_ONCE && waiting.length) {
+    const hold = drawingsHeldUntil - Date.now();
+    if (hold > 0) { clearTimeout(drawingTimer); drawingTimer = setTimeout(pumpDrawings, hold); return; }
+    const job = waiting.shift()!;
+    if (job.refs <= 0) { pending.delete(job.key); job.reject(new Error("not wanted")); continue; } // i18n-ignore: never shown
+    drawingsActive++;
+    api<SharedDrawing>("GET", `trainworld/community/${encodeURIComponent(job.row.id)}/${job.row.rev}`, undefined, { auth: false }).then(decodeShared).then(
+      (s) => { pending.delete(job.key); job.resolve(s); },
+      (e) => {
+        const status = e instanceof ApiError ? e.status : -1;
+        if ((status === 0 || status === 429 || status >= 500) && ++job.tries < DRAWING_TRIES && job.refs > 0) {
+          if (status === 429) drawingsHeldUntil = Date.now() + DRAWING_HOLD_MS;
+          waiting.push(job);
+        } else { pending.delete(job.key); job.reject(e); }
+      },
+    ).finally(() => { drawingsActive--; pumpDrawings(); });
+  }
+}
+/** A card or the viewer asks for a drawing; pair each call with `releaseDrawing` when it stops looking. */
 export function loadDrawing(row: { id: string; rev: number }): Promise<DecodedShare> {
   const key = `${row.id}/${row.rev}`;
   let p = cache.get(key);
-  if (!p) {
-    p = api<SharedDrawing>("GET", `trainworld/community/${encodeURIComponent(row.id)}/${row.rev}`, undefined, { auth: false }).then(decodeShared);
-    p.catch(() => cache.delete(key));
-    cache.set(key, p);
-    if (cache.size > CACHE_SIZE) cache.delete(cache.keys().next().value!);
-  }
+  if (p) { const job = pending.get(key); if (job) job.refs++; return p; }
+  p = new Promise<DecodedShare>((resolve, reject) => {
+    const job: DrawingJob = { key, row, refs: 1, tries: 0, resolve, reject };
+    pending.set(key, job);
+    waiting.push(job);
+  });
+  p.catch(() => cache.delete(key));
+  cache.set(key, p);
+  if (cache.size > CACHE_SIZE) cache.delete(cache.keys().next().value!);
+  pumpDrawings();
   return p;
+}
+export function releaseDrawing(row: { id: string; rev: number }) {
+  const job = pending.get(`${row.id}/${row.rev}`);
+  if (job) job.refs--;
 }
 
 export async function setLiked(id: string, liked: boolean): Promise<{ liked: boolean; likes: number }> {

@@ -240,11 +240,11 @@ Web first, so it can be shared as a link.
   when a newer route is asked or the pointer leaves real track.
 - **The demand pool** [T-149, T-173, `workers/demandClient.ts`][T-381]: 3 solving workers on 12 or more
   logical threads, 2 on 6 to 11, 1 on fewer; then a phone or tablet (by its user agent), or a device
-  of 4 GB or less, gets 1 (T-2794 adds the same check's lean ways: pixel ratio at most 2, coarse outlines held only near the view; notes/T-2794.md; T-2802: the WASM memories grow 8 MB at a time, not 32, notes/T-2802.md; a phone or tablet by user agent, not a 4 GB desktop, also has no demand cache and no market packs, so no trips between zones, unless Settings "Calculate intercity trips" is on, T-2833, T-2838; a device reporting 4 GB or less gets a note at the bottom of the map, T-2839, `ui/DeviceNote.tsx`) (`workers/deviceMemory.ts` `smallDevice`, T-2122: a phone's tab holds far
+  of 4 GB or less, gets 1 (T-2794 adds the same check's lean ways: pixel ratio at most 2, coarse outlines held only near the view; notes/T-2794.md; T-2802: the WASM memories grow 8 MB at a time, not 32, notes/T-2802.md; a phone or tablet by user agent, not a 4 GB desktop, also has no demand cache; no device opens market packs (trips between zones) while "Calculate intercity trips" is off, which is its default on a phone or tablet only, T-2833, T-2838, T-3630; a device reporting 4 GB or less gets a note at the bottom of the map, T-2839, `ui/DeviceNote.tsx`) (`workers/deviceMemory.ts` `smallDevice`, T-2122: a phone's tab holds far
   less than the phone, an iPhone's killed near 2 GB), and unreported memory (desktop Firefox, Safari)
   at most 2; a big game may then drop some by memory [T-1205, below]. Such a small device runs no
   focus pool ([demand-runtime.md](demand-runtime.md) "The focus pool"). The Settings "Use more cores" restores half the threads less one, 1 to 5
-  (one per period), at the next load; `?demandWorkers=N` overrides both. A 32-bit browser gets 1 whatever the setting, and no focus pool (`addressLimited`, T-2867: a resizable ArrayBuffer's 4 GB maximum refused; its user agent cannot tell). A worker that cannot get memory halves the solving workers, `memoryShort`, and the rest solve again; with one left it is replaced as after a panic, and the failure offers "Play without intercity trips" (`dropMarket`, this tab, game/ui.ts; notes/T-2867.md). Plus one auxiliary worker with no periods
+  (one per period), at the next load; `?demandWorkers=N` overrides both. A 32-bit browser gets 1 whatever the setting, and no focus pool (`addressLimited`, T-2867: a resizable ArrayBuffer's 4 GB maximum refused; its user agent cannot tell). A worker that cannot get memory halves the solving workers, `memoryShort`, and the rest solve again; with one left it is replaced as after a panic, and the failure offers "Play without intercity trips" (`dropMarket`, which unticks that setting, game/ui.ts; T-3630; notes/T-2867.md). Plus one auxiliary worker with no periods
   that answers at once what needs no period's result (a city's cells, each bubble's commuters by
   mode). Worker i owns periods i, i + n, .... Every worker opens only the packs the game needs, each
   its own copy: the viewed zone first (only above zoom 7.5, docs/zones.md, T-871), and every zone with a built station inside its footprint or
@@ -355,9 +355,9 @@ Web first, so it can be shared as a link.
   objects it was in borrowed, so the worker posts `dead` with `last_panic()`'s text (the panic
   message, or the allocation that failed) and does nothing more; a pack that fails to open with a
   panic is never taken for a broken pack. The page terminates it, starts a new worker in its place,
-  downloads again and reopens everything it held, then sends the newest network again under a new
+  downloads again (all replacements together keep 6 downloads going) and reopens everything it held, then sends the newest network again under a new
   version (`freshParts`: every worker composes its market afresh from the packs open, as the
-  replacement did, so all hold the same corridor table, T-1354); the shown figures stay until that final. A second panic before the replacement has seen
+  replacement did, so all hold the same corridor book, T-1354); the shown figures stay until that final. A second panic before the replacement has seen
   a solve through, or a fifth replacement in the page, stops the pool as before. `?debug=1` on the
   dev server has `twDemand.client.debugPanic(worker, "now" | "solve")`; check `t1174-panic-recover.mjs`.
   A demand worker whose code did not download (an error with no message before the worker said
@@ -380,7 +380,7 @@ Web first, so it can be shared as a link.
   shrinks, so each worker reports its memory with its heap in use and its last solve's heap peak
   (`wasm_heap_bytes`, `wasm_heap_peak`; the peak is reset as each solve starts and forgotten when
   anything closes). A worker's need, what a worker started afresh reaches, is the larger of its heap
-  at rest times 1.38 and that peak times 1.07, plus 64 MB. Once nothing is in flight (no solve, load,
+  at rest times 1.12 and that peak times 1.07, plus 64 MB. Once nothing is in flight (no solve, load,
   open, close or question, no replacement) and the network has been still for 20 s, every worker
   whose memory is at least 384 MB and 15% above its need is restarted through the panic path above,
   together and without counting as a panic; the network is solved once more, questions wait for that
@@ -710,7 +710,9 @@ all results are recomputed. Sizes: notes/T-040.md, notes/T-567.md.
   "The zone in view first"); from then a click is answered from the newest round the workers reach ("The pool", T-327),
   and the fresh final replaces the cache in one step (it is bit for bit the same). A test page, `?new=1` and a tab without the slot never
   write it. The write runs in a worker of its own (`workers/cacheWrite.worker.ts`, T-789), the
-  market's corridor table (shared by the days) copied once and transferred to it.
+  market's corridor book (shared by the days) copied once and transferred to it, with the corridor rows the page
+  holds of the zone in view and up to 15 more zones (T-2136: no worker has them at the next load until it holds
+  the market, about 20 s on the New York save; any other zone's rows wait that long).
   **Ahead of the network** (T-1539): a result whose network is the one a load worked out from its
   save also holds that network snapshot and the key of the save's network inputs (a SHA-256 of the
   save's track bytes, which a save numbers densely, without their eras tail (the trains changing over

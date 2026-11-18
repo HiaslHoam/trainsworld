@@ -131,8 +131,10 @@ wide so a longer date moves nothing [T-1868].
 ### The goal number
 
 - **The goal number**: the focused zone's mode split as one bar (driving, train, walking, in the
-  mode colours whatever the theme), the split of all its modelled local trip legs (commutes,
-  everyday outings, school and university), so the shares are of trips per day, not people [T-342].
+  mode colours whatever the theme), the split of all its trip legs within it, as the city view's Trips
+  within (its modelled local legs: commutes, everyday outings, school and university; and the
+  market's longer trips and long commutes between its own far-apart parts, T-3509), so the shares
+  are of trips per day, not people [T-342]. The Distance row's km are the local legs' alone.
   The train share follows the bar ("18.5%"; no word "Train" [T-650] and no rides count [T-832]). The
   bar's hover [T-1107, T-2365, `splitTable` in `game/splitTip.ts`; the city view's Train share row has the same] is a
   title, "Per day in New York", then a small table: **Trip count**, a strip of the modes as wide as their trips and
@@ -204,7 +206,8 @@ wide so a longer date moves nothing [T-1868].
   with no passes by its populations at this solve's time a population; the slowest worker's time, plus
   the page's wait between the local and the whole solve and the last edit's stretch from its last unit
   to its figures, is the estimate; with a newer edit waiting for that solve's final (T-1734), as long again
-  as the running solve's whole time. It counts down and takes a new estimate as the loading card's time
+  as the running solve's whole time (not for one made in the first 10 s of a local solve, which likely goes
+  at its local result, T-3616). It counts down and takes a new estimate as the loading card's time
   left does (never climbing by degrees).
   **"Calculation 1 day behind"** ("Calculation 3 days behind") takes the tag's place when a whole game
   day or more has passed since the oldest edit no solve's final covers yet (`demandBehindFrom`) while
@@ -293,11 +296,11 @@ wide so a longer date moves nothing [T-1868].
   unlabelled range, T-1888). A click sets the Day choice (Settings) to the run's
   going-out day [T-1373] (once those are past its coming-back day, then a day away), and a second
   click back to the day shown before. In the dark theme the
-  scene is mixed 15% towards the background. Pause and three
-  speeds (1x, 4x, 16x; hovers "Normal speed", "4x speed", "16x speed" [T-1800]); the third button always shows its speed as text, "16x" by
-  default [T-3327]. **Double-click it** for a slider of real to 100x [T-1664]
-  (20 stops, `SLIDER_STOPS` in `game/clock.ts`, spaced for the eye; "real" is 1 game second per second, 1/60 of 1x, and "4real" is four times that);
-  the speed picked shows as text on that button and stays until another speed button is pressed (not saved with the game).
+  scene is mixed 15% towards the background. Pause, then
+  slower and faster buttons with the speed between them as text [T-3653]: one step along the slider's 20 stops (`SLIDER_STOPS` in `game/clock.ts`,
+  real to 100x, spaced for the eye; "real" is 1 game second per second, 1/60 of 1x, and "4real" is four times that), each button off at its end; the
+  comma key slows and the period key speeds up by one step (`clock.stepSpeed`, `main.ts`; listed in Help; held, they keep stepping every 90 ms at most [T-3717]). **Click the speed** for the slider [T-1664, T-3717];
+  the speed stays until changed (not saved with the game). Replaced the 1x, 4x, 16x buttons.
   **While the player's edits are not yet in the figures** the clock runs no faster than 4x [T-1665,
   `demandCapped` in `game/lineFigures.ts`]: after an edit, until every line it changed has its riders
   again (each reads "calculating..." meanwhile: its cluster's local result, or the
@@ -463,7 +466,7 @@ step. With reduced motion asked for: one still outline 8 px out, held until the 
   stops Edit stops (the line panel; the attribute is off while the stops are being edited), trains
   the stepper in the High row of the Schedule (the trains count or the headway, whichever the line's
   schedule uses), crowd the High row's crowding dot, levels the stepper of the first row with no
-  train, play the top bar's Normal speed button, destinations the Destinations button, traffic the track display's
+  train, play the top bar's Pause button (which also resumes), destinations the Destinations button, traffic the track display's
   Traffic button, and "end" the card's Continue or Done! button once every step is ticked. The split
   step points at the top bar's mode split by its class (`GUIDE_SPLIT`). The bubble, trip and train
   share steps point at nothing. The tab icons carry `data-guide-tab`, the view rows' fold icons `data-fold`.
@@ -583,8 +586,8 @@ a chevron that opens its answer under it, one open at a time, ruled off from the
 the game's own controls through their keys ("Copy line", "Calculate intercity trips", the Select tool and its
 key, "Rebuild"), so they follow those labels in every language. Now: a branching or short turning line ("Copy
 line", then the new line's stops), an express line ("Copy line", then drop the skipped stations), a loop line
-(right click, on a phone hold, the stop to loop back to while adding stops), no intercity riders (phones only,
-where the setting exists: turn on "Calculate intercity trips"), rebuilding sections of track (the Select tool and
+(right click, on a phone hold, the stop to loop back to while adding stops), no intercity riders (only while
+the setting is off: turn on "Calculate intercity trips"), rebuilding sections of track (the Select tool and
 its bar's Rebuild), editing or deleting built track (the Delete tool, or the Select tool's Rebuild or Remove),
 four tracks using only two (new stations on the new pair and a new line), and the game recalculating after every
 piece (pause and turn off "Recalculate trips while paused", which is on by default; an entry points to a setting
@@ -613,6 +616,13 @@ dismissed, and the map and tools are blocked meanwhile.
 
 ## Settings
 
+A search box heads the tab ("Search settings", T-3681, `ui/SettingsSearch.tsx`): typing hides every row whose shown
+text (labels, options, icon buttons' names), section heading or keywords do not hold each typed word, ignoring case,
+accents and full-width letters; a matched heading shows its whole section, a matched row its heading; "No settings
+match" when none. Keywords are a short list per labelled row or heading (`ALIASES`), in English and the player's
+language, both always searched; a new setting needs no entry to be found by its label. Esc or clearing the box
+shows the tab as it was.
+
 `ui/SettingsTab.tsx`, remembered per browser, in order: two icon buttons at the top, Help (a plain "?",
 opens the [Help](#help) panel) and, when accounts are on, Account or Sign in (the person icon, the account
 panel, [Account and leaderboards](#account-and-leaderboards)) [T-1099], with light text beside the icon,
@@ -632,7 +642,9 @@ when accounts are on, Account [T-1139]: who is logged in ("Logged in as alice", 
 Google" or "Not logged in") and a button, Account settings or Sign in, that opens the same account
 panel as the icon at the top and the start menu's (sign in, recovery email, change password, sign
 out, delete; [Account and leaderboards](#account-and-leaderboards)), and Submit feedback at the bottom
-[T-1673, `ui/FeedbackPanel.tsx`]: a centred modal "Feedback" (the account panel's form styles) with Name (optional)
+[T-1673, `ui/FeedbackPanel.tsx`; the same button is on the start menu's foot and the failure screen, T-3630, the
+form mounted in a root of its own from startup, `startFeedbackUi`, so it opens with no Settings tab; sent from
+there, the "sent" note shows at the page's top centre]: a centred modal "Feedback" (the account panel's form styles) with Name (optional)
 and Message, and Send feedback. Under the feedback row, a Ko-fi cup icon link (inline SVG, the cup in the theme's colour and its heart in Ko-fi's red #ff5e5b, https://ko-fi.com/anitamaps in a new tab) with Anita's line "please consider donating to keep trains world running!" beside it; both carry the hover "this game is free, but the cost to host it is starting to get expensive. please consider donating!", then About and Changelog [T-3340]. Feedback POSTs to the account server's `/trainworld/feedback`
 (`sendFeedback` in `game/account.ts`, the same server choice as the account: live on anita.garden, `?acct=local` for
 127.0.0.1:8083), with the build id as `version`; the server stores it and mails it on, so no address is in the page.
@@ -671,7 +683,13 @@ prices per mile. All go through the distance functions in `game/format.ts`; the 
 metric. The Currency row follows.
 
 **Performance** [T-381, T-3329]: "Use more cores" (off by default) allows up to 5 demand workers instead of 3 at most; its
-hover says it takes effect after a reload ([architecture.md](architecture.md) 7). "Run in background"
+hover says it applies from the next load ([architecture.md](architecture.md) 7). "Calculate intercity trips" [T-2838,
+T-3630], on every device, remembered in the browser, on by default on a computer and off on a phone or tablet: off,
+no market pack opens, so there are no trips between zones and no demand cache (a solving worker about 174 MB lighter on
+New York's real save). Ticked mid-game it applies from the next solve; unticked mid-game, the market packs already
+open stay and keep their trips until the next load. The start menu's settings show the same box, and a game opened there has
+intercity trips as it says; "Play without intercity trips" (a memory failure) and "Load without intercity trips"
+(the start menu's memory warning) untick it. "Run in background"
 (off by default) keeps the clock running while the tab is hidden (the top bar's clock, above;
 [architecture.md](architecture.md) "A hidden page") [T-826]. "Recalculate trips while paused" (on by default): off, edits made while
 the game is paused start no demand solve; the first moment the game runs again, one solve covers them all
@@ -784,7 +802,7 @@ the first's end; the last node's distance changes no fare, so it is only dragged
 line runs high-speed trains, "High speed" with the high-speed fare multiplier in a stepper ("1.25x" by default,
 by 0.05 from 0 to 5, a click types one), its hover the rule, and after a change an undo icon ("Back
 to 1.50x") [T-1626]. Then "Transfer fare" with the fare each change of line pays in a stepper
-("$0.00" in a new game, by $0.25 as the base fare, a click types one), shown times the country's
+("$0.00" in a new game, by $0.25 as the base fare, a click types one; at most the base fare, T-3689), shown times the country's
 fare scale as the curve is [T-1801]. Last, one row "Japan fares" (the country above; no hover on the label, T-1852)
 with its fares as a multiple of the reference country's (T-2679, docs/track-and-service.md "Fares by country").
 The reference country's row shows a plain "1.00x" in the stepper's column, no stepper and no buttons (hover
@@ -835,7 +853,7 @@ all cities view ([ui-inspectors.md](ui-inspectors.md#the-all-cities-view)) and t
 same hover), its train trips per day and its profit a day (the column is headed Profit), fares less running trains and upkeep (yesterday's, today so far
 until the game has a first full day; hover: fares, running trains and upkeep, then new trains and
 construction, left out of the figure, when there were any; losses red), and its points, its forecast
-weekday's, changing as soon as the solve answers [T-3465], to three significant digits ("512k", "4.56M", "103M"; `pointsShort`) [T-831] (hover: the exact figure "on a weekday", and the rule) [T-684, T-694]. A star after the name marks a region
+weekday's, changing when a solve answers with a whole final (the last final stays shown through an edit's solve), and a dash (hover "calculating trips…") from a load until its first final [T-3465, T-3644], to three significant digits ("512k", "4.56M", "103M"; `pointsShort`) [T-831] (hover: the exact figure "on a weekday", and the rule) [T-684, T-694]. A star after the name marks a region
 whose train share has reached 10% (hover: when it was earned, "Monday, day 71, at 14:08" in the
 region's local time) [T-685]. The top bar's city name has the same points in its hover. A narrow
 list keeps about six characters of each name (60 px): below that the star goes first, then the
@@ -1083,7 +1101,7 @@ This is separate from the refusal [T-1197], which judges a save by its zones and
 **A new game** starts on day 1 at 07:00 with $10B, empty or (a sandbox) from a real network, on its
 start city's registry centre and zoom, or on the world map (centre 20° E 30° N, zoom 1.8: the
 Americas, Europe and East Asia) with no start city; a start from the player's location is centred on
-it (below). Opening the page shows the start menu (below), with "build 786" muted at its bottom left: the
+it (below). Opening the page shows the start menu (below), with "build 786" muted first in its foot: the
 commit count of the build (`__TW_VERSION__`, vite.config.ts), "dev" on a dev server.
 The address bar never carries the map position. The tab remembers its last view (sessionStorage), and
 a reload starts the map at the registry centre and zoom of the city or zone that view is in, or over
@@ -1184,14 +1202,27 @@ then removed from the address bar; other URL parameters are untouched [T-310, T-
   one (T-988), so one id names a game's save and its figures. A game that turns sandbox sends that once and is
   never listed again; one that was always a sandbox sends nothing. A slot deleted in this browser
   takes its figures off (on the next signed-in load if signed out then).
+- **Modded games** (T-3707, `game/modded.ts`): a game played in a page that is not the published game is marked
+  modded in its save (`modded`: the reasons, never removed) and never ranks: the page sends the server's latch once
+  (`{mode: "sandbox", modded: true}`, even with no figures sent before, so an older build can't list it either).
+  Marked when a mod calls `trainsworld.markModded("<name>")` (always defined; the page's own mark goes on every
+  game it plays after, the open one and any loaded or started), when the page is served from a site other than
+  anita.garden or a local or home-network address, or when the build came from the public repo
+  (`unofficial-build.txt`, which tools/opensource adds). A build stamp is never compared page side: 8800 and dev
+  servers carry unpublished ones. The mark survives a file, Make a copy, a backup, the account and a share's copy.
+- **Only the published game's scores** (T-3707): each normal send carries the build's stamp (`build`,
+  `__TW_BUILD__`). The server keeps them only from anita.garden with a stamp on the site's `builds.json`, which
+  `tools/deploy.py` writes at each publish; a refusal (426 `unpublished`) stops this page's sends for 10 minutes.
 - **Leaderboards**: the trophy opens a centred modal: a picker (World, then up to two countries in
   this game, then its cities by points; typing searches cities and countries, a country by its name in
   the player's language or in English), the top 50 (rank, name, points short, the
   exact figure in the hover; the person's flag after the name, 16 x 12 px, its name in the hover; a long name is cut, the flag never), the player's own row under them when lower, "Nobody here yet." on an
   empty board. At the bottom: Sign in to be listed (opens the account panel), a name (at most 24
   characters, the map games' name filter on the server) with Join, or Leave the leaderboards (the
-  name is kept); in a sandbox game also "Sandbox games are not listed". Each person shows once per
-  board. A game counts at the figures it last sent, not its best (T-3248); on each board the person's
+  name is kept); in a sandbox game also "Sandbox games are not listed", in a modded one "Modded games are not
+  listed", and after a refusal "Scores from this version are not listed. Reload the page for the newest.". Each person shows once per
+  board. A game counts at the figures it last sent, not its best (T-3248), sent only from a whole final solve of the
+  network as it is (no solve running or held, never the past 24 hours' stand-in, T-3639; the score on screen takes the same finals, `scoreSettled`, T-3644); on each board the person's
   row is their best game there. Anita's feedback inbox has a Leaderboards tab that sets a cutoff date:
   games last sent before it count on no board until played again. A country board ranks a game by its points summed over that country's
   cities (the same per-city figures the city boards use; the server maps city to country with a table
@@ -1206,7 +1237,7 @@ server `trainworld_community.go`, its `docs/trainworld-api.md` "Community"; note
   `trainworldCommunityPreview` on a page opened with `?community`. Otherwise no button, and a share link opens nothing.
 - **Community** (people icon in the head of the saves panel and of the leaderboards, and in Settings between Help
   and the account button), headed "Community trains worlds", with the upload icon in its head to share the game
-  being played. [Random] [Biggest] [Most liked] in [place]: Random is a shuffle (Shuffle for another); Biggest is
+  being played. [Random] [Newest] [Biggest] [Most liked] in [place]: Random is a shuffle (Shuffle for another); Newest (T-3652, shown only when the server config says `trainworldCommunityNewest`) is the newest network first, one per person, paged like Random; Biggest is
   by points in the place, one per person, never a sandbox game (a note under the list says "Sandbox games aren't
   counted"), top 50 ranked as the leaderboards are; Most liked is
   by likes, equals in random order (the panel's seed, kept while it is open, T-3258), one per person, top 50. The place is the world, a city, a country (as
@@ -1270,7 +1301,7 @@ server `trainworld_community.go`, its `docs/trainworld-api.md` "Community"; note
 
 [T-3346 stage 1, T-3469, T-3475, T-3521; `ui/inspector/SchedulePanel.tsx`, `TrainTable.tsx`, sim `TrackApi.station_departures`; notes/T-3346.md, notes/T-3521.md]
 
-- **A line's**: opened from the bigger icon by a running rail line's schedule heading (a station timetable,
+- **A line's**: opened from the bigger icon by a running line's schedule heading (a station timetable,
   hover "Detailed schedule"); a centred modal in the saved games panel's frame, up to 1320 px wide; closed by its
   close button, Esc or a click outside it (the dock's timetable chart, open under it, keeps going). Heading: the
   line's bullet and name, "schedule" in grey, then the mode choice, drawn only once Detailed and
@@ -1281,12 +1312,15 @@ server `trainworld_community.go`, its `docs/trainworld-api.md` "Community"; note
   holidays"), a row a level with the same steppers on the line's weekend counts (under headways a headway
   stepper, the count beside it; the headway stepped to is kept with the counts and the weekends run it, T-3557),
   its headway the rate settled for weekends. Beside the Weekends heading the
-  line's percent of its weekdays in a stepper (5% a click, typed 10-200), greyed with the hover "Weekend trains
+  line's percent of its weekdays in a stepper (5% a click, typed 10-200), greyed with the hover "Weekend service
   set by hand" once a weekend count is stepped, and "Apply to all lines", which asks "Set weekends to 70% of weekdays on every line, and on new lines too?" first (new lines start on that percent, `SaveHeader.newWeekendShare`, T-3588). The level in force is bold in today's section only; each section's dots are its
   own kind of day's (today's, else a weekday's or a Saturday's). A stepper's hover counts the fleet over both
-  kinds of day. Under the table, **Headways for new regular, tram or high-speed lines** (the heading names the selected line's kind; a bus or ferry line has none): the headways every new line of that kind starts with, "Default not set" until the player sets one (a new game has none, so a first line runs on train counts; without a default a line starts on counts, which give no fixed headway to show), a "Set as default" button that makes this line's headways the default for its kind (a line on counts is switched to Headway first at the headways its trains give, so it runs the same service; off while they already are) and "Clear default", shown only while one is set. The row uses the table's 12 px text
-  (T-3543, T-3588; saved with the game, `SaveHeader.newHeadway` {rail, tram, fast}; the clock worker applies them to each new rail line after it is
-  made, as a second edit, a line that cannot pay for the trains they ask staying on its counts). Then the departures board.
+  kinds of day. Under the table, **Headways for new regular, tram, high-speed, bus or ferry lines** (the heading names the selected line's kind): the headways every new line of that kind starts with, "Default not set" until the player sets one (a new game has none, so a first rail line runs on train counts; without a default a rail line starts on counts, which give no fixed headway to show; a bus or ferry line shows its tool's headways until one is set, 8, 15 and 30 min for a bus, 20, 30 and 60 for a boat, `NEW_LINE`), a "Set as default" button that makes this line's headways the default for its kind (a line on counts is switched to Headway first at the headways its trains give, so it runs the same service; off while they already are) and "Use default", which gives the line its kind's default (off while there is none or the line already runs it). The row uses the table's 12 px text
+  (T-3543, T-3588, T-3703; saved with the game, `SaveHeader.newHeadway` {rail, tram, fast, bus, ferry}; the clock worker applies them to each new rail line after it is
+  made, as a second edit, a line that cannot pay for the trains they ask staying on its counts, and makes a new bus or ferry line at them; a new bus or ferry line takes the weekend percent for new lines as a rail line does). Then the departures board.
+- **A bus or ferry line's** (T-3703): the left side alone, in buses or boats, in a panel 360 px wide: the table with
+  its Weekdays and Weekends sections and the default headways, with no track limits and no departures board or
+  timetable (the sim keeps no trip timetable for bus and ferry lines).
 - **Right**: the timetable over the chart.
 - **Departures**: headed "Departures" with a station picker (the line's stops in order, each station once, the first stop to start), then
   the board: one row per local hour of the line, from 4:00 through to 3:00, kept to the hours from the first train to
@@ -1321,9 +1355,8 @@ server `trainworld_community.go`, its `docs/trainworld-api.md` "Community"; note
 [T-677; `ui/StartMenu.tsx`; the startup order in [architecture.md](architecture.md) "Loading and readiness"]
 
 - Every page load opens on the logo (below) over a card on the bare map, in the loading card's look:
-  no tagline [T-1710], New game at the top with, at the right of its row, the language picker (the Settings
-  row's globe and select) and the account button when accounts are on [T-972, T-2753]; the new game sheet
-  has the picker at the right of its heading, then "Saved games", one card per game as in the saves panel (T-2037: the version with the latest player change on top, the latest save first), each a button with the
+  no tagline [T-1710], New game at the top with, at the right of its row, the account button when accounts are on
+  [T-972] and Community; the new game sheet has the account button at the right of its heading; then "Saved games", one card per game as in the saves panel (T-2037: the version with the latest player change on top, the latest save first), each a button with the
   saves panel's picture (the same 240 x 160 with its names) and facts (name, when saved, day, cities, lines, stations, cash), and under it, joined to it, the saves panel's "3 other versions" line and list (above).
   Signed in (T-988), the slots are first settled against the account (a click on a card waits for
   that, 10 s at most), and a game only on the account is a card with a cloud (hover "On your
@@ -1348,7 +1381,14 @@ server `trainworld_community.go`, its `docs/trainworld-api.md` "Community"; note
   menu's dialog is named "trainsworld". The trains are the only motion; with reduced motion asked for,
   one still frame. `?logo=0` leaves the logo out: the card is then headed "Welcome to trainsworld!"
   and only city, town and village names are hidden.
-- **Update row** [T-2810; `ui/updates.ts` is the one list of updates, newest first]: at the screen's bottom right above the map attribution, a compact row framed in the theme colour, with 12 px muted text throughout, the newest update's one line, a Changelog button (a Modal listing each update's version, date and changes; each change has its area's icon in the area's colour, the list sorted by area with an area's bug fixes after its other changes and a little lighter, and a group such as "track bug fixes" lists its changes indented under it [T-3466]; one page per x.y version, v0.3 holding v0.3 to v0.3.5, picked with buttons under the title, the newest open [T-3468]) and an x that hides it for good in this browser. It shows for 2 days from the update's `at` (bumped at publish), not on the new game sheet. On narrow screens it can cover the saves; its close button stays visible.
+- **Foot** [T-3630, after Anita's pick of the footer line, 2026-11-18]: one line at the bottom left, on the menu and
+  the new game sheet alike, 12 px muted: "build 786", About this game, Submit feedback (opens the feedback form, as
+  in Settings), the language picker (the Settings row's globe and select; here only, so a new player who lands on
+  the sheet finds it in the same place, T-2753) and a gear (hover "Settings") that opens a small panel over the line
+  with the settings that matter before a game loads: Calculate intercity trips, Use more cores and Panel and text
+  size, the same controls as in Settings; a press outside it or Esc closes it. The line wraps on a narrow screen;
+  it and the update row stand in one column at the bottom, the row above, so neither covers the other.
+- **Update row** [T-2810; `ui/updates.ts` is the one list of updates, newest first]: at the screen's bottom right above the foot (and so above the map attribution), a compact row framed in the theme colour, with 12 px muted text throughout, the newest update's one line, a Changelog button (a Modal listing each update's version, date and changes; each change has its area's icon in the area's colour, the list sorted by area with an area's bug fixes after its other changes and a little lighter, and a group such as "track bug fixes" lists its changes indented under it [T-3466]; one page per x.y version, v0.3 holding v0.3 to v0.3.5, picked with buttons under the title, the newest open [T-3468]) and an x that hides it for good in this browser. It shows for 2 days from the update's `at` (bumped at publish), not on the new game sheet. On narrow screens it can cover the saves; its close button stays visible.
 - A click on a save opens that slot (a sandbox's name has the "Sandbox" mark). New game shows the
   new game sheet (above) in the card, headed "New game", with Back to the menu; its Start starts the
   game in a new slot, so no saved game is replaced. The slot is first written once the network has
@@ -1528,10 +1568,11 @@ server `trainworld_community.go`, its `docs/trainworld-api.md` "Community"; note
   second, or "No progress for 1 min" after 90 s with nothing arriving, as a zone's bar has it
   ([ui-demand-views.md](ui-demand-views.md)). While the loading card is up it says the same in the
   middle of the map, and the status shows nothing.
-- If demand cannot load, a screen says so and offers two buttons, Try again (reload) and Play
-  without demand, and takes every key until one is pressed. If the game itself never started (the
-  clock worker failed to start, or the page's setup threw before its end), it has Try again alone
-  [T-950]. A saved game that browser storage cannot read (four tries over about two seconds) is such a
+- If demand cannot load, a screen says so and offers Try again (reload), Submit feedback (the feedback form,
+  whose report carries the failure's text, T-3630) and Play without demand, and takes every key until one is
+  pressed (the feedback form's typing excepted). If the game itself never started (the
+  clock worker failed to start, or the page's setup threw before its end), it has Try again and Submit feedback
+  alone [T-950]. A saved game that browser storage cannot read (four tries over about two seconds) is such a
   failure: the reason line says the save could not be read and nothing was written over it, and the game
   never opens as the Original game or a new one in its place [T-2703]. The box is centred, 400 px wide, the sentence balanced over its lines; when the address
   names a game (it has a query), a Back to start button sits beside Try again (it opens the address

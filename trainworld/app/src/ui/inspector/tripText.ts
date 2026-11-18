@@ -65,6 +65,7 @@ export const modeName = (m: ModeId): string => t(MODE_KEYS[m]);
 const TERM_KEYS: Record<string, MessageKey> = {
   "starting the drive": "tripText.termStartingTheDrive",
   drive: "tripText.termDrive",
+  "driven by a parent": "tripText.termDrivenByParent",
   "drop-off": "tripText.termDropOff",
   "parking at the station": "tripText.termParkingAtStation",
   "parking at home": "tripText.termParkingAtHome",
@@ -90,7 +91,7 @@ const TERM_KEYS: Record<string, MessageKey> = {
   "until the flight": "tripText.termUntilFlight",
   flight: "tripText.termFlight",
 };
-export const termLabel = (id: string): string => (TERM_KEYS[id] ? t(TERM_KEYS[id]) : id);
+export const termLabel = (id: string, vehicle: string = "train"): string => (TERM_KEYS[id] ? t(TERM_KEYS[id], { vehicle }) : id);
 
 /** One term of an effective time equation: "walk 8 × 1.5", "wait 3", "fare $2.90 × 3". `label` is
  * already worded (`termLabel`). */
@@ -137,6 +138,9 @@ export const tripWords = (f: PurposeFilter): string => t("tripText.tripsWords", 
 /** "312k trips", "1 errands trip": a count and the word, `amount` already written. */
 export const tripsAmount = (amount: string, n: number, f: PurposeFilter): string =>
   t("tripText.tripsAmount", { kind: kind(f), words: f === "all" ? "" : purposeWords(f), amount, count: Math.round(n) });
+
+/** Felt minutes a bus or ferry boarding adds to a ride's perceived wait: sim/src/demand/kernel/access.rs `BUS_BOARD_MIN`. */
+export const BUS_BOARD_FELT_MIN = 4;
 
 /** The hover of a ride in a route: its wait, its ride and its stops, in minutes to one decimal. `row`
  * is the line's stats (its bus row, a ferry's too, or its tram flag), `full` the wait for a train with room (T-842), `late` the

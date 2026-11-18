@@ -9,9 +9,9 @@
 // `/noritetsu/config` to say `trainworld`: an older server, or none, keeps every icon hidden.
 //
 // While signed in, each normal game's points (the forecast weekday's, the Cities tab's) are sent at
-// most every two wall minutes when they change, joined or not, so a board is current the moment its
-// player joins. A game owns a random id per browser slot (`GAMES_KEY`), or its account game's id
-// (T-988); a sandbox sends only the fact, once, which the server keeps for good. A slot deleted here
+// most every two wall minutes when they change and only from a whole final solve (T-3639), joined or
+// not, so a board is current the moment its player joins. A game owns a random id per browser slot
+// (`GAMES_KEY`), or its account game's id (T-988); a sandbox sends only the fact, once, which the server keeps for good. A slot deleted here
 // takes its figures off.
 //
 // T-988: the games themselves go on the account too (workers/cloud.ts, game/accountGames.ts); this
@@ -19,7 +19,7 @@
 
 import { effect, signal } from "@preact/signals";
 import { moneyState } from "./money";
-import { pointsScore } from "./points";
+import { pointsBeforeCover, pointsPerDay, scoreSettled } from "./points";
 import { startPlaytime } from "./playtime";
 import { startGameTime } from "./gameTime";
 import { startAchievementCounts } from "./achievementCounts";
@@ -37,7 +37,7 @@ export interface AccountView {
   pendingEmail: string;
 }
 interface Session { token: string; account: AccountView }
-export interface AccountConfig { googleClientId: string; dev: boolean; password: boolean; signIn: boolean; trainworld?: boolean; trainworldGames?: boolean; trainworldFeedback?: boolean; trainworldFeedbackThreads?: boolean; /** T-3326: how many screenshots a new feedback takes; absent or 0 on a server that drops them */ trainworldFeedbackImages?: number; trainworldPing?: boolean; trainworldAchievements?: boolean; trainworldCommunity?: boolean; trainworldCommunityPreview?: boolean; trainworldCommunitySearch?: boolean; trainworldCommunityPages?: boolean; trainworldFlags?: boolean; /** T-3279: the flag list version the server accepts (game/flags.json `set`) */ trainworldFlagSet?: number }
+export interface AccountConfig { googleClientId: string; dev: boolean; password: boolean; signIn: boolean; trainworld?: boolean; trainworldGames?: boolean; trainworldFeedback?: boolean; trainworldFeedbackThreads?: boolean; /** T-3326: how many screenshots a new feedback takes; absent or 0 on a server that drops them */ trainworldFeedbackImages?: number; trainworldPing?: boolean; trainworldAchievements?: boolean; trainworldCommunity?: boolean; trainworldCommunityPreview?: boolean; trainworldCommunitySearch?: boolean; trainworldCommunityPages?: boolean; /** T-3652: the list takes view=newest */ trainworldCommunityNewest?: boolean; trainworldFlags?: boolean; /** T-3279: the flag list version the server accepts (game/flags.json `set`) */ trainworldFlagSet?: number }
 export interface BoardSetting { on: boolean; name: string; /** set when a moderator hid the display name; absent on a server that does not say */ nameHidden?: boolean; /** T-3269: the flag beside the name, game/flags.ts */ flag?: string }
 export interface BoardRow { rank: number; name: string; value: number; flag?: string }
 export interface Board { board: string; count: number; rows: BoardRow[]; me?: BoardRow }
@@ -360,9 +360,9 @@ export async function gameForShare(): Promise<string | null> {
   const cid = saveSlotsState.peek().slots.find((x) => x.key === slot)?.cloud?.id;
   let e = games()[slot] ?? { id: cid ?? newGameId() };
   if (cid && e.id !== cid) e = { id: cid };
-  if (m && unranked(m) && !e.sandbox) {
+  if (m && unranked(m) && !e.sandbox && m.slot === slot) {
     try {
-      await api("PUT", `trainworld/score/${e.id}`, { mode: "sandbox" });
+      await api("PUT", `trainworld/score/${e.id}`, latch(m));
       e.sandbox = true;
     } catch { /* shared untagged */ }
   }
@@ -372,29 +372,46 @@ export async function gameForShare(): Promise<string | null> {
   return e.id;
 }
 
-/** The game's figures now: weekday points (T-3465, `pointsScore`) in all, and its best cities. */
+/** The game's figures now: the forecast weekday's points (T-3465) in all, and its best cities. */
 function figures(): { day: number; points: number; cities: Record<string, number> } | null {
   const m = moneyState.peek();
   const hour = m?.hours.at(-1)?.hour;
-  if (!m || hour === undefined) return null;
-  const per = [...pointsScore.peek()].filter(([id, v]) => id && v > 0).sort((a, b) => b[1] - a[1]);
+  const how = scoreSettled.peek();
+  if (!m || hour === undefined || !how) return null;
+  // the weekday row itself: `pointsScore` falls back to the past 24 hours, which a weekend or holiday lowers
+  const per = [...pointsPerDay.peek()].map(([id, r]): [string, number] => [id, Math.round(r[0])]).filter(([id, v]) => id && v > 0).sort((a, b) => b[1] - a[1]);
   // the server refuses a figure over 1e12 (twMaxPoints), which would leave a bigger game stuck on its last accepted one
   const cap = (v: number) => Math.min(Math.round(v), 1e12);
   const points = cap(per.reduce((a, [, v]) => a + v, 0));
+  // running lines whose points are not in yet; T-3657: unless fares pay none of the running cost, a real 0
+  if (points <= 0 && how !== "idle" && !pointsBeforeCover.peek()) return null;
   const cities: Record<string, number> = {};
   for (const [id, v] of per.slice(0, MAX_CITIES)) cities[id] = cap(v);
   return { day: Math.floor(hour / 24), points, cities };
 }
 
-/** A game whose figures never rank: a sandbox, or (T-3115) a copy of a shared network, which the server is told is a
- * sandbox so it never ranks there either, the copy's own play notwithstanding. */
-const unranked = (m: { mode: string; copy?: boolean }) => m.mode === "sandbox" || m.copy === true;
+/** A game whose figures never rank: a sandbox, (T-3115) a copy of a shared network, or (T-3707) a modded game, which
+ * the server is told is a sandbox so it never ranks there either, the copy's own play notwithstanding. */
+const unranked = (m: { mode: string; copy?: boolean; modded?: boolean }) => m.mode === "sandbox" || m.copy === true || m.modded === true;
+/** T-3707: the latch the server keeps for good; a modded game says so (older servers read it as a sandbox's) */
+const latch = (m: { modded?: boolean }) => (m.modded ? { mode: "sandbox", modded: true } : { mode: "sandbox" });
+
+/** T-3707: the server keeps scores only from the published game, and refused this page's (shonei-server
+ * trainworld_builds.go): a dev page, or a tab open since a publish. Asked again after REFUSED_WAIT_MS, as a publish
+ * that has just gone live can be refused for its first minute. */
+export const scoresRefused = signal(false);
+let refusedAt = 0;
+const REFUSED_WAIT_MS = 10 * 60_000;
+declare const __TW_BUILD__: string | undefined;
+const BUILD = typeof __TW_BUILD__ === "string" ? __TW_BUILD__ : "dev";
 
 let sending = false;
 /** Send the playing game's figures if they changed and the gap has passed (`now` skips the gap). */
 export async function sendScores(now = false) {
   const s = session.peek(), slot = playingSlot(), m = moneyState.peek();
-  if (sending || !s || accountState.peek() !== "on" || !slot || !m) return;
+  // T-3687: while a load is under way the money can be the incoming game's and the slot still the one before; a
+  // sandbox or a copy opened from a normal game would latch that game for good
+  if (sending || !s || accountState.peek() !== "on" || !slot || !m || m.slot !== slot) return;
   const all = games(), acct = s.account.id;
   // T-988: the slot's game id on the account names its figures too (a fork or a kept copy has a new one)
   const cid = saveSlotsState.peek().slots.find((x) => x.key === slot)?.cloud?.id;
@@ -402,30 +419,37 @@ export async function sendScores(now = false) {
   if (cid && e.id !== cid) e = { id: cid };
   let body: unknown;
   if (unranked(m)) {
-    // only a game that may have figures on this account needs the notice
-    if (e.sandbox || e.acct !== acct || !e.sent) return;
-    body = { mode: "sandbox" };
+    // only a game that may have figures on this account needs the notice; a modded one is latched anyway (T-3707), so
+    // a build that does not read the mark (an open tab of an older one) can never list it
+    if (e.sandbox || (!m.modded && (e.acct !== acct || !e.sent))) return;
+    body = latch(m);
   } else {
     const f = figures();
-    if (!f) return;
+    if (!f || (scoresRefused.peek() && Date.now() - refusedAt < REFUSED_WAIT_MS)) return;
     const sig = JSON.stringify([f.points, f.cities]);
     const before = e.acct === acct ? e.sent : undefined;
     if (sig === before || (!before && f.points <= 0)) return;
     if (!now && before && Date.now() - (e.at ?? 0) < SEND_GAP_MS) return;
-    body = { mode: "normal", ...f };
+    body = { mode: "normal", build: BUILD, ...f };
     e.sent = sig;
   }
   sending = true;
   try {
     await api("PUT", `trainworld/score/${e.id}`, body);
     if (unranked(m)) e.sandbox = true;
+    else {
+      delete e.sandbox; // listed, so not latched: a 403 remembered by mistake, or a latch taken off by hand
+      if (scoresRefused.peek()) scoresRefused.value = false;
+    }
     e.acct = acct;
     e.at = Date.now();
     lsSet(GAMES_KEY, { ...games(), [slot]: e });
     if (boards.peek().at) boards.value = { ...boards.peek(), at: 0 }; // the boards may have moved
   } catch (err) {
+    // T-3707: not the published build (a dev page, or a tab open since a publish): none of this page's will be kept
+    if ((err as ApiError).code === "unpublished") { scoresRefused.value = true; refusedAt = Date.now(); }
     // a game the server knows as a sandbox: it stays unlisted, so stop asking
-    if ((err as ApiError).status === 403) lsSet(GAMES_KEY, { ...games(), [slot]: { ...e, sandbox: true, acct } });
+    else if ((err as ApiError).status === 403) lsSet(GAMES_KEY, { ...games(), [slot]: { ...e, sandbox: true, acct } });
   } finally {
     sending = false;
   }

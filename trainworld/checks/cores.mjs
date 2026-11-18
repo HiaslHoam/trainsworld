@@ -12,8 +12,10 @@ import { cpus } from 'node:os';
 import { basename } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-const MAPS = fileURLToPath(new URL('../../', import.meta.url));
-const ARTIFACTS = fileURLToPath(new URL('../../artifacts/trainworld/', import.meta.url));
+// the shared ledger is the main tree's: from an agent's worktree (maps/.tw-trees/<name>/) a claim in the tree's own
+// copy of cores.py went to a cores.json nobody else reads
+const MAPS = fileURLToPath(new URL('../../', import.meta.url)).replace(/[\\/]\.tw-trees[\\/][^\\/]+[\\/]?$/, '/');
+const ARTIFACTS = MAPS + 'artifacts/trainworld/'; // and so is the registry of which cores each check holds
 
 const REGISTRY = ARTIFACTS + 'check-cores.json';
 let PLAN = null;
@@ -42,7 +44,7 @@ export function corePlan() {
   else {
     const name = `check-${basename(process.argv[1] ?? 'node').replace(/\.mjs$/, '')}-${process.pid}`;
     const want = Number(process.env.TW_CORES_WANT ?? 3);
-    const r = spawnSync('python', [MAPS + 'cores.py', 'claim', String(want), name, '--pid', String(process.pid), 'Playwright check'], { encoding: 'utf8' });
+    const r = spawnSync('python', [MAPS + 'cores.py', 'claim', String(want), name, '--pid', String(process.pid), 'Playwright check'], { encoding: 'utf8', windowsHide: true });
     n = Number(r.stdout?.trim().split('\n').at(-1));
     if (!(n >= 1)) n = 1;
     claimed = name;
@@ -59,7 +61,7 @@ export function corePlan() {
   PLAN = { n: cores.length, cores, mask, workers: Math.max(1, cores.length - 1), claimed };
   process.on('exit', () => {
     const r = readRegistry(); delete r[process.pid]; writeRegistry(r);
-    if (claimed) spawnSync('python', [MAPS + 'cores.py', 'release', claimed], { stdio: 'ignore' });
+    if (claimed) spawnSync('python', [MAPS + 'cores.py', 'release', claimed], { stdio: 'ignore', windowsHide: true });
   });
   console.log(`      cores: ${cores.length} (${cores.join(',')}, mask 0x${mask.toString(16).toUpperCase()})${claimed ? ', from the ledger' : ''}, demandWorkers ${PLAN.workers}`);
   return PLAN;
@@ -82,7 +84,7 @@ foreach ($id in $ids) {
 export function chromeAffinity({ profile = '', rootPid = '', mask = null } = {}) {
   if (process.platform !== 'win32') return { count: 0, masks: [] };
   const r = spawnSync('powershell', ['-NoProfile', '-NonInteractive', '-Command', PS], {
-    encoding: 'utf8',
+    encoding: 'utf8', windowsHide: true,
     env: { ...process.env, TW_PIN_MASK: mask ? String(mask) : '', TW_PIN_ROOT: String(rootPid || ''), TW_PIN_PROFILE: profile.replace(/\//g, '\\') },
   });
   const rows = (r.stdout ?? '').split('\n').map((l) => l.trim().split(' ')).filter((p) => p.length === 2);

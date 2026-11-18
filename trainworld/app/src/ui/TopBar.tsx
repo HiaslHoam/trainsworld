@@ -2,7 +2,6 @@
 // train share), cash, the time and date on one line (T-1853), speed and pause. The clock is its own
 // component so a game minute re-renders only it. The sky and demand band are `MapSky`, on the map.
 
-import type { ComponentChildren } from "preact";
 import { clock, DEMAND_CAP, REAL4_SPEED, REAL_SPEED, SLIDER_STOPS, SPEEDS } from "../game/clock";
 import { activeCity, cityById, viewedZone } from "../game/cities";
 import { demandAskTurn, demandView, modeRides, modeSplit, viewRecomputing, viewUpdating } from "../game/demand";
@@ -13,8 +12,9 @@ import { PERIODS, periodAt } from "../game/periods";
 import { SkyBanner } from "./SkyBanner";
 import { StatusTag } from "./StatusTag";
 import { BusyTag } from "./BusyTag";
+import { ViewedLike } from "./Community";
 import { countryName, groupHolidays, holidaysNear, loadHolidays, rushNear, runToday, superDays, supersNear, type HolidaySpan, type RushSpan } from "../game/holidays";
-import { useEffect, useRef, useState } from "preact/hooks";
+import { useEffect, useLayoutEffect, useRef, useState } from "preact/hooks";
 import { display, setDisplay, shownDay, shownDayOn } from "../game/ui";
 import { splitTable, splitTip } from "../game/splitTip";
 import { lengthsOf, wantLengths } from "../game/zoneLengths";
@@ -22,7 +22,7 @@ import { t, tList, tNumber, tSpaced } from "../i18n";
 import { tPlace } from "../i18n/places";
 import { world } from "../game/world";
 import { liveMoney, moneyState } from "../game/money";
-import { pointsScore, pointsShort } from "../game/points";
+import { pointsShort, pointsShown } from "../game/points";
 import { Icon } from "./widgets";
 import { perfOff } from "../perfFlags";
 import { manageSaveSlot, saveSlotsState } from "../workers/clockClient";
@@ -136,6 +136,19 @@ function HolidayDot({ today }: { today: boolean }) {
   return <button class={"holiday-dot btn-dot" + (coming ? " coming" : "") + (showing ? " on" : "")} data-tip={lines.join("\n")} aria-label={t("topBar.longHolidays")} onClick={click} />;
 }
 
+/** T-3635: an element whose text the game sets itself on each render, with no Preact text node inside.
+ * A page translator or extension that wraps or replaces text nodes then can't freeze the text, and
+ * can't leave Preact a text node it must insert beside: that insert threw mid-diff, and each throw
+ * left a stale copy of the clock in the bar. */
+function useOwnText<E extends HTMLElement>(text: string) {
+  const ref = useRef<E>(null);
+  useLayoutEffect(() => {
+    const el = ref.current;
+    if (el && el.textContent !== text) el.textContent = text;
+  });
+  return ref;
+}
+
 /** T-861, T-1853: the time and date on one line. */
 function Clock() {
   // ?perfOff=clock (T-045, measurement only): read without subscribing, so it never re-renders.
@@ -148,12 +161,22 @@ function Clock() {
   const near = holidaysNear.value;
   const todayHols = holidayLines(minute, near, false).filter((l) => l.today).map((l) => l.text);
   const dateTip = t("topBar.dateTip", { weekday: t("topBar.weekday", { day: WEEKDAY_KEYS[weekdayOf(day)] }), month: MONTH_LONG[month], date, year: yearOf(day), day });
+  const time = useOwnText<HTMLElement>(clockTime(minute)), dateText = useOwnText<HTMLSpanElement>(dateName(day));
+  // T-3635: any throw in this diff makes Preact mount a fresh clock and leave the old one in the bar;
+  // whatever the cause, a stale copy lasts one render at most
+  const box = useRef<HTMLDivElement>(null);
+  useLayoutEffect(() => {
+    const me = box.current, bar = me?.parentElement;
+    if (!bar) return;
+    for (const c of bar.querySelectorAll(":scope > .clock")) if (c !== me) c.remove();
+  });
+  // T-3635: the dot (none, an <i> or a <button>) has a slot of its own, so it is only ever inserted
+  // into an empty element, never before a node something else may have moved
   return (
-    // T-3635: a page translator rewriting the date's text can break the holiday dot's diff and leave stale clocks behind
-    <div class="clock" translate={false}>
+    <div class="clock" ref={box}>
       <div class="clock-text" data-tip={held ? t("topBar.clockHeld") : [dateTip, ...todayHols].join("\n")}>
-        <b class={"time lg" + (held ? " held" : "")}>{clockTime(minute)}</b>
-        <span class="date"><HolidayDot today={todayHols.length > 0} />{dateName(day)}</span>
+        <b class={"time lg" + (held ? " held" : "")} ref={time} />
+        <span class="date"><span class="dot-slot"><HolidayDot today={todayHols.length > 0} /></span><span ref={dateText} /></span>
       </div>
     </div>
   );
@@ -169,6 +192,7 @@ export function MapSky() {
   const hols = [...holidayLines(minute, near, true).map((l) => l.text), ...rushLines(minute, rush, near, true)];
   return <div class="map-sky">
     <SkyBanner skyTip={hols.length ? hols.join("\n") : undefined} bandTip={periodTip(minute)} />
+    <ViewedLike />
     <div class="sky-status"><StatusTag /><BusyTag /></div>
   </div>;
 }
@@ -188,7 +212,7 @@ function Cash() {
 
 /** The city's name, the whole of it and its points (T-684, T-3465: its forecast weekday's) on hover. */
 function CityName({ id, name, tip }: { id: string | null; name: string; tip?: string }) {
-  const score = id ? pointsScore.value.get(id) : undefined;
+  const score = id ? pointsShown.value?.get(id) : undefined;
   const lines = [name];
   if (id && score) lines.push(t("topBar.pointsPast", { count: exact(score) }));
   return <div class="city" data-tip={tip ?? (id ? lines.join("\n") : undefined)}>{name}</div>;
@@ -198,12 +222,10 @@ function CityName({ id, name, tip }: { id: string | null; name: string; tip?: st
 const times = (x: number) =>
   Math.abs(x - REAL_SPEED) < 1e-9 ? t("topBar.speedReal") : Math.abs(x - REAL4_SPEED) < 1e-9 ? t("topBar.speedReal4") : `${x}x`;
 
-/** T-1664: double-click the fastest button for a slider of speeds, real to 100x (the third button always
+/** T-1664: click the speed figure for a slider of speeds, real to 100x (the third button always
  * shows its speed as text); T-1665: while demand updates the clock is held at DEMAND_CAP, the chosen speed dimmed. */
 function Speed() {
   const running = clock.running.value;
-  const speed = clock.speed.value;
-  const custom = clock.custom.value;
   const capped = clock.capped.value;
   const [open, setOpen] = useState(false);
   const box = useRef<HTMLDivElement>(null);
@@ -217,24 +239,21 @@ function Speed() {
   }, [open]);
   const chosen = clock.chosenRate.value / SPEEDS[0];
   const held = capped && chosen > DEMAND_CAP;
-  const heldTip = (title: string) => (held ? t("topBar.speedCapped", { speed: times(chosen), cap: times(DEMAND_CAP) }) : title);
-  const btn = (i: number, icon: ComponentChildren, title: string, extra: Record<string, unknown> = {}) => {
-    const on = running && (custom !== null ? 2 : speed) === i;
-    return (
-      <button class={"btn icon" + (on ? " on" : "") + (on && held ? " held" : "") + (i === 2 ? " rate" : "")} data-tip={on ? heldTip(title) : title} aria-label={title} onClick={() => (i === 2 && custom !== null ? clock.setMultiple(custom) : clock.setSpeed(i))} {...extra}>
-        {i === 2 ? times(custom ?? SPEEDS[2] / SPEEDS[0]) : icon}
-      </button>
-    );
-  };
-  const stop = Math.max(0, SLIDER_STOPS.findIndex((s) => s >= chosen - 1e-9));
+    const stop = Math.max(0, SLIDER_STOPS.findIndex((s) => s >= chosen - 1e-9));
   return (
     <div class="group speed" ref={box}>
-      <button class={"btn icon" + (!running ? " on" : "")} data-tip={t("topBar.pauseTip")} aria-label={t("topBar.pause")} onClick={() => clock.setRunning(!running)}>
+      <button class={"btn icon" + (!running ? " on" : "")} data-guide="play" data-tip={t("topBar.pauseTip")} aria-label={t("topBar.pause")} onClick={() => clock.setRunning(!running)}>
         <Icon.pause />
       </button>
-      {btn(0, <Icon.play1 />, t("topBar.normalSpeed"), { "data-guide": "play" })}
-      {btn(1, <Icon.play2 />, t("topBar.speed", { speed: times(SPEEDS[1] / SPEEDS[0]) }))}
-      {btn(2, null,t("topBar.speedPick", { speed: times(custom ?? SPEEDS[2] / SPEEDS[0]) }), { onDblClick: () => setOpen((o) => !o) })}
+      <button class="btn icon" data-tip={t("topBar.slower")} aria-label={t("topBar.slower")} disabled={stop <= 0} onClick={() => clock.stepSpeed(-1)}>
+        <Icon.slower />
+      </button>
+      <button class={"btn icon rate" + (held ? " held" : "")} data-tip={held ? t("topBar.speedCapped", { speed: times(chosen), cap: times(DEMAND_CAP) }) : t("topBar.speedPick", { speed: times(chosen) })} aria-label={t("topBar.speedPick", { speed: times(chosen) })} onClick={(e) => { if (e.detail < 2) setOpen((o) => !o); }}>
+        {times(chosen)}
+      </button>
+      <button class="btn icon" data-tip={t("topBar.faster")} aria-label={t("topBar.faster")} disabled={stop >= SLIDER_STOPS.length - 1} onClick={() => clock.stepSpeed(1)}>
+        <Icon.play2 />
+      </button>
       {open && (
         <div class="slider speed-pop">
           <input type="range" min={0} max={SLIDER_STOPS.length - 1} step={1} value={stop} aria-label={t("topBar.clockSpeed")}
@@ -304,7 +323,9 @@ export function TopBar() {
   const note = demandView.value && (viewRecomputing.value || demandView.value.version === CACHE_VERSION) ? tSpaced(t("topBar.recomputing")) : "";
   const worldTip = total ? t("topBar.worldTip", { cities: total.cities, stations: total.stations }) : undefined;
   return (
-    <><header id="topbar">
+    // T-3635: a page translator leaves the bar alone (numbers, a clock and a place name, all shown in the
+    // game's language already); text it replaces would stop updating
+    <><header id="topbar" translate={false}>
       {/* T-1108: the name takes what it needs up to a cap, on two lines at most, the whole name on hover */}
       {far ? <CityName id={null} name={t("topBar.world")} tip={worldTip} /> : <CityName id={city?.id ?? null} name={cityName} />}
       <div class="split">
