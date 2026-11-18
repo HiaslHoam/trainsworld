@@ -161,8 +161,8 @@ Full design, numbers and sources: `notes/T-008.md`.
   suggestions (T-534, `map/stationNames.ts`, worked out when asked and never stored) are:
   - **the real station** [T-3571]: the real station (noritetsu's, `map/realStations.ts`) nearest the spot
     within 150 m, in Latin letters as the game writes place names: its own name where that is in them,
-    else its English one, else Cyrillic transliterated; one with none of those (some of Japan's,
-    China's, Greece's) or a name in use gives no suggestion. A ferry port never takes one. The region's
+    else its English one, else Cyrillic transliterated (in Japanese, Chinese or Korean, its own name
+    first: below); one with none of those (some of Japan's, China's, Greece's) or a name in use gives no suggestion. A ferry port never takes one. The region's
     stations are fetched when the station tool is picked; a click before they arrive names as if there
     were none;
   - **the cross street**: the nearest named street on the basemap within 400 m ("W 42nd St"), when
@@ -180,6 +180,17 @@ Full design, numbers and sources: `notes/T-008.md`.
   No street, neighbourhood or tile label ending in "station" ("Station", "Sta.", "Stn", any case:
   a stop's own label in OSM) is suggested; the next candidate takes its place. A city, town,
   village or hamlet keeps its name even then (Huntington Station is a place) [T-568].
+
+  **In the player's script** [T-3631]: with the game in Japanese, Chinese (either) or Korean, each
+  suggestion takes the local name (the real station's own, the tile's `name`, the place list's OSM name)
+  where every letter of it is in a script the language reads: kanji and kana for Japanese, Han for
+  Chinese (as written, Simplified or Traditional), Hangul or Han for Korean; else the Latin name (a
+  Japanese player in Seoul gets "Gangnam"). A place's name drops one administrative suffix where its
+  OSM kind is that unit and two characters stay (`i18n/nativeNames.ts`: 世田谷区 to 世田谷, 九亭镇 to 九亭,
+  陆家嘴街道 and 陆家嘴社区 to 陆家嘴, 강남구 to 강남, 역삼1동 to 역삼; a block number at any length, 桜三丁目 to 桜;
+  never 大手町, 종로3가 or 仙乐小区), or takes a shorter other name it starts with. A name in use gives way to
+  東世田谷 / 上海南 / 동대구, else 世田谷2. A station's own footbridge, passage or exit on the basemap
+  (保土ヶ谷駅東口歩道橋) is suggested in no language; 駅前通り still is. Stations already named keep their names.
 
   A new station takes the real station, else the cross street, else the neighbourhood, else the nearest place of any kind
   on the place list (neighbourhoods within 2.5 km of their label point, towns 5 km), else a place
@@ -224,7 +235,9 @@ Full design, numbers and sources: `notes/T-008.md`.
   The drawing tool sets it: `set_route_join` names a point on the track to join at each end (the track
   nearer the pointer while double track is drawn as two, ui-building.md "Drawing track"), else the route
   takes the track beside it, the one it meets without crossing the
-  other (on its side of the double track it leaves, or of the other single track there). The map draws a
+  other (on its side of the double track it leaves, or of the other single track there). Where only single
+  track is on the route's side (double track splitting into singles) and the route has a side of it, the
+  track beside wins over the pointer (T-3609). The map draws a
   joined end on its track (`network.ts` `legShifts`, from `join_edges`), easing back to the piece's centre
   line over the turnout and crossing the near track for a far-track join; a one-way end with no join
   (flyovers laid before joins) keeps the T-3117 guess, away from the nearest track leaving its way. A single-track
@@ -264,7 +277,7 @@ Full design, numbers and sources: `notes/T-008.md`.
   Splitting a piece keeps the flag on both halves; pieces join only with the same way along the joined
   piece. Capacity: single track that runs one way, set or by its run, is a directed track like double
   (section = `edge_section_s` + v / `SIGNAL_BRAKE`, per direction, `capacity::directed`), not shared.
-  Platforms and stations on it are unchanged. The map draws chevrons along it (`oneWayTrackChevrons`),
+  Platforms and stations on it are unchanged. The map draws chevrons along it (`oneWayTrackRuns`, one every 300 m of distance along a connected run),
   the hover says "One way".
 - **Quad track** (T-255): the other setting. The stroke draws the double track as usual and an
   express double track beside it, 8 m to the left of the drawn direction (centre to centre, so
@@ -328,7 +341,7 @@ Full design, numbers and sources: `notes/T-008.md`.
 - **Street tram track** (T-2927, `TrackKind::StreetTram`): tram track on streets, 0.1x at ground, 60 km/h cap, 0.6x the
   upkeep of ground rail, a quarter of what hills add (T-3004) and half what water adds (T-2928). It may run at ground level over water (T-3106, "Water, bridges and ramps"). With Tram picked, Snap to
   streets (on by default, remembered; Ctrl flips it while held, and in the
-  tram tool Ctrl means nothing else but, where that leaves the segment off the streets, straight on from track, T-3260) lays it, the streets a tram may follow tinted green over the map while it is on
+  tram tool with the switch on, Ctrl pauses the snap and the segment is free, T-3608) lays it, the streets a tram may follow tinted green over the map while it is on
   (T-2998; the bus tool's teal hint, without motorways): a first click within 100 m of a street lands on it; the route to
   the pointer follows the basemap's streets (no motorways), shortest with 200 m added for each turn over 30
   degrees, a turn back of 135 to 165 degrees costing 200 m rising to 400 m (T-3035) and none over 165 (nor any over 135
@@ -365,7 +378,7 @@ Full design, numbers and sources: `notes/T-008.md`.
   never refused (the tag's lowest limit shows it); no fit says "The roads are too tight here. Add a point on the
   way." It is placed as an ordinary route through those corners at the level, track count and type picked (as the
   real snap's), the road's centre line at every level, in one undo step, and costs what any route does: no discount
-  for following a road. Ctrl held draws by hand, straight on from track (ui-building.md "Ctrl", T-3260). A pointer
+  for following a road. Ctrl held draws by hand, free to the pointer (ui-building.md "Ctrl", T-3608). A pointer
   with no road within 100 m draws an ordinary segment. Quad track on roads carries both pairs on from a loose quad
   end and ends them apart, as quad drawn through points does (T-3261, below).
 - **Doubling up** (T-708, `TrackApi::double_up`): double track already placed, blueprint or

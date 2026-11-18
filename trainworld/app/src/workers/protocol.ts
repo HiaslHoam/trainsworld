@@ -152,7 +152,7 @@ export type EditOp =
   /** T-3021: the line's end turned round the loop past `station`, the stop before the branch, run one way (`TrackApi::turn_end`); `openLoop` makes a loop line open again: a circle less its closing stop, a turned line less its way back (`open_loop`). Refused with "LinePath" */
   | { op: "turnEnd"; line: number; station: NodeId }
   | { op: "openLoop"; line: number }
-  | { op: "setTrainCount"; line: number; trains: [number, number, number] }
+  | { op: "setTrainCount"; line: number; trains: [number, number, number]; /** T-3528: not on the undo history (the cap lowering on load) */ unrecorded?: true }
   /** T-625: the line's trains follow a headway in seconds per level (0: no service), or null: counts by hand */
   | { op: "setHeadway"; line: number; seconds: [number, number, number] | null }
   /** T-3521: a line's weekends at a percent of its weekdays (`TrackApi.set_line_weekend_share`), its
@@ -857,7 +857,7 @@ export type FromClock =
   /** `index.bin`: which blocks have a file */
   | { kind: "terrainIndex"; bytes: ArrayBuffer }
   /** T-2613: terrain grids and water masks on their way, and those whose last fetch failed */
-  | { kind: "ground"; pending: number; failed: number }
+  | { kind: "ground"; pending: number; failed: number; why: string[] }
   /** T-1929: road tiles just put in the track model: a preview asked before them is out of date */
   | { kind: "roads" }
   /** T-729: the opened zones of the game in hand, sent before its snapshot; null for a save from

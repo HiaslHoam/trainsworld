@@ -189,13 +189,27 @@ wide so a longer date moves nothing [T-1868].
   [T-2045]; it goes once the zone in view's figures are final, though other zones still solve
   [T-392], and a zone solved on its own first counts as final at its last round [T-2045]. The tag
   shows all the while the clock is capped (below): when the zone in view is final and the cap still
-  holds for an edit, it says **"Calculating trips after your change…"** [T-2622]. While capped, the
-  tag's hover says "Time capped at 4x while updating demand".
+  holds for an edit, it says **"Calculating trips after your change…"** [T-2622]. It says the same
+  while an edit's whole solve runs after its local result showed, until that solve's final: the
+  local result keeps the longer trips and other zones' riders as they were before the edit (a line
+  with no trains left can read tens of thousands) [T-3601]. While capped, the
+  tag's hover says "Time capped at 4x while updating demand". After an edit the hover's first line is
+  the time left [T-3599]: on "Calculating trips after your change…" to the edit's final, on the
+  recomputing tag to the zone in view's figures; "About 5 min left" in whole minutes, "Less than a
+  minute left" under 60 s, "Time left not known yet" before the solve has a plan, or while units whose
+  populations mostly have no timed pass are left and none like them has ended (the first edit after some
+  loads of a big game). Each solving worker times its units of the solve (a period of a local solve, a
+  round of a period of a cluster solved whole, the zone in view's split free flow) by its populations'
+  last passes, at the pace this solve and the last edit's ran against them, period by period, and a unit
+  with no passes by its populations at this solve's time a population; the slowest worker's time, plus
+  the page's wait between the local and the whole solve and the last edit's stretch from its last unit
+  to its figures, is the estimate; with a newer edit waiting for that solve's final (T-1734), as long again
+  as the running solve's whole time. It counts down and takes a new estimate as the loading card's time
+  left does (never climbing by degrees).
   **"Calculation 1 day behind"** ("Calculation 3 days behind") takes the tag's place when a whole game
   day or more has passed since the oldest edit no solve's final covers yet (`demandBehindFrom`) while
   some figures in play still miss it: a line reading "calculating...", or the zone
-  in view recomputing [T-2409]. Lines whose local result is in count for nothing: they are within
-  about 2% of the whole solve [T-1733, T-2410]. While the
+  in view recomputing [T-2409]. Lines whose local result is in count for nothing [T-1733, T-2410]. While the
   edit changes the zone in view's figures the split is faded, the figures held [T-232]; a zone the edit
   does not touch, or whose cluster is already done, keeps its split unfaded. The split's hover ends
   "(trips being recomputed…)" in the same cases. A city loading later shows "Loading data" with a thin bar
@@ -618,8 +632,8 @@ when accounts are on, Account [T-1139]: who is logged in ("Logged in as alice", 
 Google" or "Not logged in") and a button, Account settings or Sign in, that opens the same account
 panel as the icon at the top and the start menu's (sign in, recovery email, change password, sign
 out, delete; [Account and leaderboards](#account-and-leaderboards)), and Submit feedback at the bottom
-[T-1673, `ui/FeedbackPanel.tsx`]: a centred modal "Feedback" (the account panel's form styles) with Name (optional), Email
-("Email (optional)") and Message, and Send feedback. Under the feedback row, a Ko-fi cup icon link (inline SVG, the cup in the theme's colour and its heart in Ko-fi's red #ff5e5b, https://ko-fi.com/anitamaps in a new tab) with Anita's line "please consider donating to keep trains world running!" beside it; both carry the hover "this game is free, but the cost to host it is starting to get expensive. please consider donating!", then About and Changelog [T-3340]. Feedback POSTs to the account server's `/trainworld/feedback`
+[T-1673, `ui/FeedbackPanel.tsx`]: a centred modal "Feedback" (the account panel's form styles) with Name (optional)
+and Message, and Send feedback. Under the feedback row, a Ko-fi cup icon link (inline SVG, the cup in the theme's colour and its heart in Ko-fi's red #ff5e5b, https://ko-fi.com/anitamaps in a new tab) with Anita's line "please consider donating to keep trains world running!" beside it; both carry the hover "this game is free, but the cost to host it is starting to get expensive. please consider donating!", then About and Changelog [T-3340]. Feedback POSTs to the account server's `/trainworld/feedback`
 (`sendFeedback` in `game/account.ts`, the same server choice as the account: live on anita.garden, `?acct=local` for
 127.0.0.1:8083), with the build id as `version`; the server stores it and mails it on, so no address is in the page.
 Beside the message the report carries the browser, memory, language, the last load failure, the currency, and
@@ -1509,7 +1523,8 @@ server `trainworld_community.go`, its `docs/trainworld-api.md` "Community"; note
   edit's solve runs, "Calculating trips in 81 cities…" while a whole solve runs (the zones it still
   has to finish, as "Trips in 81 cities being recomputed…" counts them; the zone's name for one), and
   "Loading data…" with no solve running. Its hover has the time left as the loading card words it
-  (the zone's load's, else the running whole solve's; none for the zone's own solve), counted down each
+  (the zone's load's, else the running whole solve's; none for the zone's own solve; after an edit, the
+  edit's, as the capped tag's above), counted down each
   second, or "No progress for 1 min" after 90 s with nothing arriving, as a zone's bar has it
   ([ui-demand-views.md](ui-demand-views.md)). While the loading card is up it says the same in the
   middle of the map, and the status shows nothing.

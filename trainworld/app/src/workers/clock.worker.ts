@@ -1275,7 +1275,7 @@ let groundWait = 0;
 function watchGround(key: string, p: Promise<unknown>) {
   groundPending.add(key);
   sendGround();
-  void p.then(() => { groundFailed.delete(key); }, () => { groundFailed.add(key); }).then(() => {
+  void p.then(() => { groundFailed.delete(key); groundWhy.delete(key); }, (err) => { groundFailed.add(key); groundWhy.set(key, String(err)); }).then(() => {
     groundPending.delete(key);
     if (groundFailed.size) retryGroundLater();
     else groundWait = 0;
@@ -1283,11 +1283,15 @@ function watchGround(key: string, p: Promise<unknown>) {
   });
 }
 
+/** the error text of each failed key, for a feedback report */
+const groundWhy = new Map<string, string>();
+
 function sendGround() {
-  const k = `${groundPending.size} ${groundFailed.size}`;
+  const why = [...groundFailed].slice(0, 5).map((k) => `${k} ${(groundWhy.get(k) ?? "bad file").slice(0, 80)}`);
+  const k = `${groundPending.size} ${groundFailed.size} ${why.join("|")}`;
   if (k === groundSent) return;
   groundSent = k;
-  send({ kind: "ground", pending: groundPending.size, failed: groundFailed.size });
+  send({ kind: "ground", pending: groundPending.size, failed: groundFailed.size, why });
 }
 
 /** T-3479: the status tag clicked: what failed is fetched again now, and the wait before the next try starts over */
@@ -4156,7 +4160,7 @@ function applyInner(op: EditOp): Applied {
       return { r: r === 0 ? 0 : INSERT_REFUSED };
     }
     case "setTrainCount":
-      return { r: a.set_train_counts(op.line, ...op.trains) };
+      return { r: op.unrecorded ? a.set_train_counts_unrecorded(op.line, ...op.trains) : a.set_train_counts(op.line, ...op.trains) };
     case "setHeadway":
       return { r: op.seconds ? a.set_auto_headway(op.line, ...op.seconds) : a.clear_auto_headway(op.line) };
     case "weekendShare":

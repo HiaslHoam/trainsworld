@@ -243,7 +243,9 @@ Track is drawn through points, double and quad alike [T-418, T-422, T-423]. The 
   segment will end beside track. The red and yellow dots are 19 px across, the blue ring 30 px [T-3163, T-3204]. With Single track picked at double track the dot shows which track the click takes: offset to that track's side (its drawn offset, at least 6 px, so it reads zoomed out; the pointer within 3 px of the centre line zoomed out takes neither), and at a double's loose end an orange dot, centred, where both tracks merge into the single one (between the tracks zoomed in, or on the centre line zoomed out) [T-3204].
 - **Which track single track joins** [T-3137]: with Single track picked and the zoom where double track
   draws as two tracks (`laneState(zoom).t > 0`), a point on or at the end of double track picks the
-  track nearer the pointer, for branching off and merging onto alike. Double track is picked across the
+  track nearer the pointer, for branching off and merging onto alike, except where double track splits
+  into singles: there the sim gives the single the track on its own side (T-3609), while the dot still
+  follows the pointer. Double track is picked across the
   pair's whole drawn width (centre offset plus half a track's width, never under the usual 8 px) [T-3162]. A double's loose end is picked the same way: zoomed in, the pointer over one track within a node radius of the end carries on that track (the node, with that track's join), zoomed out it joins neither [T-3190]. A leg's drawn end eases back to its own centre line over at least 80 m (`EASE_M`) [T-3191]. Double track branching off single track (the only double at a node of single track) narrows to the single's centre line over 40 m at that end, built (`taperAt`) and as the ghost (`ghostStrokes`) [T-3171]; the sim treats the junction as before: no join, no flat badge, the single trunk both ways. The dot sits on that track (as far
   off the centre line as the tracks are drawn), and the route's start and end send that point as
   `RouteAsk.join` (`TrackApi::set_route_join`) with each preview and the click. Zoomed out the dot stays
@@ -345,8 +347,9 @@ Track is drawn through points, double and quad alike [T-418, T-422, T-423]. The 
   (either way along it, so a branch off the middle of track goes straight either way), so the segment has no
   curve; the line is the start's heading (the last segment's end heading, else the first leg of a ghost from
   there, `Placed.dir`). From open ground every segment is straight already. Not while a route follows the
-  real network or the roads or streets (with Snap to roads, Ctrl draws by hand, so straight; with Tram it
-  flips the street snap as before, and straight only where that leaves the segment off the streets). Ramps
+  real network, and not while the street snap switch is on (Snap to roads, or Snap to streets with Tram): there Ctrl
+  pauses the snap and draws by hand to the pointer, curved as ever, and the snap returns when it is let go [T-3608];
+  with Tram's switch off, Ctrl still turns the street snap on as before. Ramps
   over crossed track are unchanged (they change the level, not the line); as Ctrl joins nothing, it makes no
   junction and so no flyover. Nothing in the tag says so (dropped on purpose, Anita 2026-11-12).
 - **The ghost** is drawn as blueprint track (dark blue rails round a light blue middle) with a thin
@@ -595,7 +598,8 @@ switch on, the track tool follows the real network the layer draws.
   passenger track, with every tram line added for tram track. Each kind is its own family but rail and light
   rail (one for train track) and tram and light rail (one for tram track). For tram track the 60 degree turn
   rule takes each chain's heading 10 m in, not 30, as a 12-15 m junction curve running on into the cross street
-  reads as a sharper turn over 30 m. Snapped tram track is off-street
+  reads as a sharper turn over 30 m; the graph keeps tram track's shape to 0.5 m (other track to 3 m), as a corner
+  curve cut into 20 m chords reads as a turn over 60 degrees [T-3515]. Snapped tram track is off-street
   tram track, its corners fitted with tram curves ([track-and-service.md](track-and-service.md) "Tram track").
 
 - **The ring**: within 12 px of a drawn real line (the layer's own rendered features), the ring
@@ -606,7 +610,8 @@ switch on, the track tool follows the real network the layer draws.
   track asks the router worker for the route. It is the cheapest over the graph files
   (`packs/realgraph/<cc>.rgr`: the drawn track, and short undrawn track joining it at two points or
   more, at most 3 km a group, so a tunnel portal or station throat no line runs over leaves no gap
-  [T-816]), every chain within the snap radius (plus 20 m) a candidate at
+  [T-816]; tram sidings, diversions and spurs among it, not depot yards, so a city's tram links no line is
+  mapped over join up [T-3515]), every chain within the snap radius (plus 20 m) a candidate at
   either click, its distance from the click counted twice; where the two clicks' candidates share
   no family (one on the metro under a main-line station, the other on rail), each click also takes
   the other's family within 400 m [T-923]; no turn sharper than 60 degrees where

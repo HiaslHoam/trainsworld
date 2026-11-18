@@ -1,4 +1,4 @@
-// T-1673: Settings' "Submit feedback" opens this modal: name and email (both optional) and a message,
+// T-1673: Settings' "Submit feedback" opens this modal: a name (optional) and a message,
 // sent to the account server's /trainworld/feedback (game/account.ts sendFeedback), which stores it
 // and mails it on. No address is in the page. What was typed stays until it is sent.
 //
@@ -39,7 +39,9 @@ export function browserOf(ua: string): string {
   if (!m) return ua.slice(0, 120);
   const name = ({ Edg: "Edge", OPR: "Opera", FxiOS: "Firefox", CriOS: "Chrome", Version: /Safari/.test(ua) ? "Safari" : "Browser" } as Record<string, string>)[m[1]] ?? m[1];
   const version = name === "Safari" ? /Version\/([\d.]+)/.exec(ua)?.[1] ?? m[2] : m[2];
-  return name + " " + version;
+  // Every iOS browser runs WebKit, so the iOS version is what places a WebKit bug (T-3612)
+  const ios = /\b(?:iPhone )?OS (\d+(?:_\d+)*) like Mac OS X/.exec(ua)?.[1]?.replace(/_/g, ".");
+  return name + " " + version + (ios ? " (iOS " + ios + ")" : "");
 }
 
 /** T-2826: what a report carries beside the message: the game version, the browser, whether the device
@@ -98,7 +100,6 @@ export function FeedbackButton() {
 
 export function FeedbackPanel() {
   const [name, setName] = useState("");
-  const [contact, setContact] = useState("");
   const [message, setMessage] = useState("");
   const [kind, setKind] = useState("");
   const [state, setState] = useState<"" | "sending">("");
@@ -141,7 +142,7 @@ export function FeedbackPanel() {
     setState("sending"); setMsg("");
     try {
       const pics = room ? await Promise.all(images.map(imageField)) : [];
-      await sendFeedback({ name: name.trim(), contact: contact.trim(), message: message.trim(), context: reportContext(), kind: kind || undefined, images: pics });
+      await sendFeedback({ name: name.trim(),message: message.trim(), context: reportContext(), kind: kind || undefined, images: pics });
       images.forEach(dropImage); setImages([]);
       setMessage(""); setKind(""); setState("");
       close();
@@ -159,8 +160,6 @@ export function FeedbackPanel() {
       onDrop={room ? (e) => { setOver(false); const fs = Array.from(e.dataTransfer?.files ?? []); if (fs.length) { e.preventDefault(); void addFiles(fs); } } : undefined}>
       <input name="name" placeholder={t("feedbackPanel.namePlaceholder")} aria-label={t("feedbackPanel.nameLabel")} autocomplete="name" maxLength={100}
         value={name} onInput={(e) => setName((e.target as HTMLInputElement).value)} />
-      <input name="email" type="email" placeholder={t("feedbackPanel.emailPlaceholder")} aria-label={t("feedbackPanel.emailLabel")} autocomplete="email" maxLength={200}
-        value={contact} onInput={(e) => setContact((e.target as HTMLInputElement).value)} />
       <textarea name="message" placeholder={t("feedbackPanel.messageLabel")} aria-label={t("feedbackPanel.messageLabel")} rows={6} maxLength={4000}
         value={message} onInput={(e) => setMessage((e.target as HTMLTextAreaElement).value)} />
       {room > 0 && <div class="fb-shots">
