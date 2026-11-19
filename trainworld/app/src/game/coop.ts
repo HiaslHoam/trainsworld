@@ -35,8 +35,8 @@ type Logged = { op: EditOp; at?: number; lead?: number };
 
 type Msg =
   | { k: "hello"; from: string }
-  | { k: "host"; from: string; e: number }
-  | { k: "sync"; from: string; e: number; bytes: Uint8Array }
+  | { k: "host"; from: string; e: number; build?: string }
+  | { k: "sync"; from: string; e: number; bytes: Uint8Array; build?: string }
   | { k: "go"; from: string; e: number }
   | { k: "ready"; from: string; e: number; next: number }
   | { k: "ops"; from: string; to: string; e: number; first: number; ops: Logged[] }
@@ -47,6 +47,9 @@ type Msg =
   | { k: "speed"; from: string; running: boolean; x: number }
   | { k: "bye"; from: string };
 
+declare const __TW_BUILD__: string | undefined;
+/** This page's build: a guest of another build than its host's would run a game that drifts from the host's. */
+const BUILD = typeof __TW_BUILD__ === "string" ? __TW_BUILD__ : "dev";
 const CHANNEL = "trainsworld-coop";
 const KEY = "trainsworld-coop";
 const REFUSED: EditAnswer = { ok: false, issues: [], charge: 0 };
@@ -106,7 +109,7 @@ async function sync() {
   if (!bytes) { syncing = false; coopStatus.value = "idle"; return; }
   me = { ...me, epoch: me.epoch + 1, awaitGo: true };
   write();
-  post({ k: "sync", from: me.id, e: me.epoch, bytes });
+  post({ k: "sync", from: me.id, e: me.epoch, bytes, build: BUILD });
   if (!await coopLoad(bytes, t("coop.slotName"), false)) {
     say(t("coop.loadFailed"), true);
     syncing = false;
@@ -204,6 +207,12 @@ function hello() {
 
 async function onGuest(m: Msg) {
   const guest = me!;
+  // a host of another build (or one too old to say): the page must be reloaded to the same build before joining
+  if ((m.k === "host" || m.k === "sync") && m.build !== BUILD) {
+    say(t("coop.buildMismatch"), true);
+    leaveCoop();
+    return;
+  }
   switch (m.k) {
     case "host":
       if (inGame() && m.e === guest.epoch) post({ k: "ready", from: guest.id, e: guest.epoch, next: nextSeq });
@@ -270,7 +279,7 @@ function listen() {
   // a lost connection came back: what was sent in between is gone, so say who we are again
   channel.onReconnect?.(() => {
     if (me?.role === "guest") hello();
-    else if (me?.role === "host") post({ k: "host", from: me.id, e: me.epoch });
+    else if (me?.role === "host") post({ k: "host", from: me.id, e: me.epoch, build: BUILD });
   });
 }
 
@@ -282,7 +291,7 @@ function begin(stored: Stored) {
   if (stored.role === "host") {
     setCoopHooks(null, hostApplied);
     coopStatus.value = stored.awaitGo ? "syncing" : "idle";
-    post({ k: "host", from: stored.id, e: stored.epoch });
+    post({ k: "host", from: stored.id, e: stored.epoch, build: BUILD });
   } else {
     setCoopHooks(guestRoute, null);
     coopStatus.value = stored.epoch > 0 ? "loading" : "waitingHost";

@@ -570,6 +570,7 @@
   "coop.relayClosed": "The online game was closed by its host.",
   "coop.connectionLost": "Connection lost, trying again…",
   "coop.relayFailed": "The server could not be reached.",
+  "coop.buildMismatch": "The host runs another version of the game. Reload both pages so they are on the same version, then join again.",
   "common.aboutGame": "About this game",
   "commutersInspector.areas": "{count, plural, one {One area} other {# areas}}",
   "commutersInspector.driving": "Driving",
