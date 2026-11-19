@@ -3,12 +3,13 @@
 // Its hover says more. T-2693: a thin bar in every case (see `share` below); no ring since T-2728.
 
 import { computed, effect, signal } from "@preact/signals";
-import { demandBehindFrom, demandScope, demandStep, demandSolving, demandWork, workShare, demandUpdating, demandView, focusZones, intercityDemand, refiningZone, viewRecomputing } from "../game/demand";
+import { demandBehindFrom, demandHeld, demandScope, demandStep, demandSolving, demandWork, editHeld, workShare, demandUpdating, demandView, focusZones, intercityDemand, refiningZone, viewRecomputing } from "../game/demand";
 import { linesPending } from "../game/lineFigures";
 import { count } from "../game/format";
 import { clock, DEMAND_CAP } from "../game/clock";
 import { activeCity, cityById, viewedZone, type CityId } from "../game/cities";
-import { STAGE_TEXT } from "../game/loadBar";
+import { nextLeft, STAGE_TEXT } from "../game/loadBar";
+import { editLeft, editPrior } from "../game/editLeft";
 import { loadFailText } from "../game/loadText";
 import { cityNames,demandIdle, demandStopped, loadFailure, loadLines, loadProgress, memoryResolve, oldestDownload, solveLeft, zoneFailures, zoneLoads, zoneSteps } from "../game/loading";
 import { selection } from "../game/ui";
@@ -16,6 +17,7 @@ import { tripView } from "../game/trip";
 import { LoadBar, loadingCardShown } from "./LoadingScreen";
 import { bubblesWaiting, farWaiting } from "../map/commuterView";
 import { groundNet, shadeDownloads } from "../game/terrain";
+import { retryGround } from "../workers/clockClient";
 import { basemapSlow } from "../map/basemap";
 import { t } from "../i18n";
 import { tPlace } from "../i18n/places";
@@ -28,6 +30,9 @@ const behindDays = computed(() => {
   if (from === null || !(linesPending.value.size || viewRecomputing.value)) return 0;
   return Math.max(0, Math.floor((clock.minute.value - from) / 1440));
 });
+
+/** T-3601: an edit no final covers yet is being solved (its local result may already show) */
+const editUnsettled = computed(() => demandUpdating.value && demandBehindFrom.value !== null);
 
 function recomputing(): string {
   // T-2045: the zone in view being solved alone ahead of a load's whole solve
@@ -65,24 +70,58 @@ function waitText(zone: CityId): string {
 /** its hover: the time left of a whole solve (or the zone's own load), or that nothing has come for a while */
 function waitTip(zone: CityId): string {
   second.value;
+  // T-3599: an edit's solve: the time left of it
+  if (waitText(zone) === t("statusTag.calculatingAfterChange")) return afterChangeLeft();
   const z = zoneSteps.value.get(zone);
   const left = z ?? (focusZones.value.get(zone) === false ? undefined : solveLeft.value ?? undefined);
   return loadLines(left ? { leftMs: left.leftMs, at: left.at } : undefined).join("\n");
+}
+
+/** T-3599: the time left of an edit's solve as the hover shows it, counted down between estimates and taking
+ * a new one in as `nextLeft` does (so it never climbs by degrees); null until the solve has one */
+const editShown: Record<"all" | "view", { leftMs: number; at: number } | null> = { all: null, view: null };
+// (a solve that starts as a held edit's whole wait goes on keeps the count: `editHeld` clears just after)
+effect(() => { if (!demandWork.value && !editHeld.peek()) editShown.all = editShown.view = null; });
+/** (`view`: to the zone in view's figures, for the tag saying they are being recomputed) */
+function afterChangeLeft(part: "all" | "view" = "all"): string {
+  const now = performance.now();
+  const w = demandWork.value;
+  // (a load's solve, or one after memory was freed, has the load's estimate)
+  let est = w ? editLeft(w, now, editPrior, part) : part === "all" && solveLeft.value ? Math.max(0, solveLeft.value.leftMs - (now - solveLeft.value.at)) : null;
+  // a newer edit waits for this solve to end, then is solved as long again, roughly
+  const held = editHeld.value;
+  if (w && est !== null && held) est += now - held.sentAt + est;
+  const was = editShown[part];
+  if (est !== null) editShown[part] = { leftMs: nextLeft(was ? was.leftMs : null, est, was ? now - was.at : 0), at: now };
+  const s = editShown[part];
+  if (!s) return t("statusTag.leftUnknown");
+  const ms = Math.max(0, s.leftMs - (now - s.at));
+  return ms < 60_000 ? t("statusTag.leftUnderMinute") : t("statusTag.leftMinutes", { n: Math.round(ms / 60_000) });
 }
 /** T-2613: terrain has been downloading for TERRAIN_SLOW_MS (grids and masks for the clock worker, or
  * the hillshade's tiles), so a quick download on a pan never flashes the tag */
 const TERRAIN_SLOW_MS = 1500;
 const terrainSlow = signal(false);
 let slowTimer = 0;
+/** T-3479: until this time a retry click keeps the tag on "Downloading terrain…" whatever the downloads do */
+let retryHoldUntil = 0;
 /** T-2693: the most downloads waiting at once since the last time none were, so the bar is the share finished */
 let terrainPeak = 0;
 effect(() => {
   const waiting = groundNet.value.pending + shadeDownloads.value;
   const on = waiting > 0;
   terrainPeak = on ? Math.max(terrainPeak, waiting) : 0;
-  if (!on) { clearTimeout(slowTimer); slowTimer = 0; terrainSlow.value = false; }
+  if (!on) { clearTimeout(slowTimer); slowTimer = 0; if (Date.now() >= retryHoldUntil) terrainSlow.value = false; }
   else if (!slowTimer && !terrainSlow.peek()) slowTimer = window.setTimeout(() => { slowTimer = 0; terrainSlow.value = true; }, TERRAIN_SLOW_MS);
 });
+/** T-3479: the failed tag clicked: the downloads go again now, and the tag says so at once, for a second at
+ * least, so a try that fails as fast still shows it was made */
+function retryTerrain() {
+  retryGround();
+  terrainSlow.value = true;
+  retryHoldUntil = Date.now() + 1000;
+  window.setTimeout(() => { if (!groundNet.peek().pending && !shadeDownloads.peek()) terrainSlow.value = false; }, 1000);
+}
 function terrainText(): string | null {
   return terrainSlow.value ? t("statusTag.terrainDownloading") : groundNet.value.failed ? t("statusTag.terrainFailed") : null;
 }
@@ -186,6 +225,8 @@ export function StatusTag() {
     : !demandView.value ? (demandIdle.value ? null : t("statusTag.loadingDataDots")) // T-318: nothing to load over dead space
     // T-1493: the zone in view has figures but its bubbles are still on their way
     : bubblesWaiting.value ? t("statusTag.loadingDataDots")
+    // T-3427: edits made while paused, held for the game to run ("Recalculate trips while paused" off)
+    : demandHeld.value ? t("statusTag.heldPaused")
     // T-2523: a click whose answer waits says what the game is working on
     : clickWait.value ? waitText(clickWait.value)
     : behindDays.value >= 1 ? t("statusTag.behind", { count: behindDays.value })
@@ -193,9 +234,16 @@ export function StatusTag() {
     // say one thing; once the zone in view is final, other zones still solving show nothing
     // T-1904: and whether that is the zone in view alone or a whole solve of many, which takes longer
     : viewRecomputing.value ? recomputing()
-    // T-2622: the clock capped for an edit whose figures elsewhere are not in, the zone in view final
-    : clock.capped.value ? t("statusTag.calculatingAfterChange") : null;
+    // T-2622: the clock capped for an edit whose figures elsewhere are not in, the zone in view final;
+    // T-3601: or an edit's whole solve still running after its local result showed (lines there hold the
+    // longer trips of before the edit until its final)
+    : clock.capped.value || editUnsettled.value ? t("statusTag.calculatingAfterChange") : null;
   if (!busy) { trackWait(null); stopWaitTimer(); tickSlow(false); return null; }
+  // T-3427: edits held while paused: nothing is working, so a hover and no bar
+  if (demandHeld.value && busy === t("statusTag.heldPaused")) {
+    trackWait(null); stopWaitTimer(); tickSlow(false);
+    return <div class="status-tag" role="status" data-tip={t("statusTag.heldPausedTip")}><span class="demand-busy">{busy}</span></div>;
+  }
   const onTerrain = busy === terrain, terrainFailed = onTerrain && !terrainSlow.value;
   const onMap = !onTerrain && busy === mapWait;
   const base = onMap ? "" : onTerrain ? (terrainFailed ? t("statusTag.terrainFailTip") : "")
@@ -203,6 +251,11 @@ export function StatusTag() {
     : !demandView.value ? busy
     : bubblesWaiting.value ? ""
     : clickWait.value ? waitTip(clickWait.value)
+    : busy === t("statusTag.calculatingAfterChange") ? afterChangeLeft()
+    // (a wait past a game day at the cap, 6 min, says how far behind instead: the same time left)
+    : behindDays.value >= 1 && busy === t("statusTag.behind", { count: behindDays.value }) && demandUpdating.value ? afterChangeLeft()
+    // T-3599: the zone in view's trips recomputed after an edit
+    : viewRecomputing.value && busy === recomputing() && demandUpdating.value && demandBehindFrom.value !== null ? afterChangeLeft("view")
     : "");
   const tip = [base, !onTerrain && clock.capped.value ? t("statusTag.capped", { cap: DEMAND_CAP }) : ""].filter(Boolean).join("\n") || undefined;
   const failed = onTerrain ? terrainFailed : !!loadFailure.value || !!zoneFailure;
@@ -226,6 +279,10 @@ export function StatusTag() {
   slowTick.value;
   const slow = failed ? null : slowLine(kind);
   const tipAll = [tip, slow].filter(Boolean).join("\n") || undefined;
+  // T-3479: terrain that failed is tried again on a click
+  if (terrainFailed) return <button type="button" class="status-tag" aria-live="polite" data-tip={tipAll} onClick={retryTerrain}>
+    <span class="demand-busy">{busy}</span>
+  </button>;
   return <div class="status-tag" role="status" data-tip={tipAll}>
     <span class="demand-busy">{busy}</span>
     {!failed && <LoadBar fraction={share!} step={busy} thin quiet={kind !== "load"} />}

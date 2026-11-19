@@ -358,7 +358,18 @@ whole solves, each cluster the edit touched is solved locally first when its mar
 untouched cities still hold what they last solved: only the city populations whose view changed (a
 station or stop of theirs added, removed or moved, their lines' trains changed; run times within 1%,
 trains an hour within 5% and a stop's service span (the share of riders with a train due) within 0.06,
-one train a day more or less, count as unchanged), through their rounds and the capacity fit. Each
+one train a day more or less, count as unchanged), through their rounds and the capacity fit. A
+period every population of the cluster holds from its last whole solve on the same inputs (setUp's
+test, T-124) is not solved locally: it keeps its figures and its `trail`, and the whole solve after
+keeps it too, so a train change at one level costs that level's periods twice at most, not all five
+(T-3512). A worker whose touched populations took 35% or more of its changed periods' passes in the
+cluster's last whole solve (`passMs`, `LOCAL_SHARE_MAX`) skips the local solve and goes straight to
+the whole one: a one-city game's city is most of its cluster, and the local solve then only put the
+final later (`?perfOff=localSkip`, `?perfOff=localKeep` off). The page then sends `whole` at once, and
+a worker still solving locally stops at its next pass, since its local result can no longer be shown
+(dev `?localShare=a,b` sets each solving worker's share, to make two disagree). A population opened
+again at another level has no timed passes until its next whole solve, so the edit after a re-level
+keeps its local solve. Each
 round crowds on the others' loads as that round of their last solve was priced on (kept per
 population, period and round, `trail`; a shared period's market loads per round as the other worker
 sent them), plus their own, so with nothing changed it repeats the whole solve; the market's are
@@ -382,14 +393,17 @@ the market's pairs with an end in a window of zones, in a population of their ow
 frozen market (`IntercityApi.set_window`): the zones with a changed station in an access list, then
 the zones whose nearest station is within that run's minutes by rail at free flow (at most 180),
 nearest first, while the window's stations are at most 9% of those the market searches or 800,
-whichever is more. Each pair is
+whichever is more. A line whose trains at some level go to or from none (switched on or off)
+opens the window too, its stations counted as changed, with no reach past the zones that have one of
+them in an access list unless a 20-minute run also changed (T-3600, notes/T-3600.md). Each pair is
 searched towards its end in the window alone: a pair starting there and ending outside is priced on
 the route costs the other way, a leg ending outside (a trip home, or the trip out of a pair kept
 under its home) is assigned as the leg the other way turned around onto the same lines. It is solved
 in one pass a period at the crowding the touched cities' last round ended on, then held to the
 trains' room with them; the old market part gives the same pairs' old loads in one pass at its last
 crowding (`window_loads`), and the result's loads are the frozen market's less those plus the
-window's, each purpose to its own. A shorter edit (a city line) leaves the whole market frozen. The
+window's, each purpose to its own. A shorter edit (a city line, a train count) leaves the whole
+market frozen. The
 window's pairs are taken from the market part's own tables when the new network serves the same
 zones and joins them by track the same way (`set_network_ll_beside`, T-2878), else dealt from
 nothing.

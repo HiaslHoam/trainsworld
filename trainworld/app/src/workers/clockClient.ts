@@ -4,6 +4,7 @@
 // with `onNetworkSnapshot` (the demand pool, T-026).
 
 import { t, tDate, type MessageKey } from "../i18n";
+import { attachClockTrace, editTrace, trace, tracing } from "../game/freezeTrace";
 import { effect, signal } from "@preact/signals";
 import type { DiagramGraph } from "../diagram/graph";
 import { clock } from "../game/clock";
@@ -11,6 +12,8 @@ import { activeCity, HOME_CITY, setWorldFrame, viewedZone } from "../game/cities
 import { setDemandFineSink, setGameOpened, setOpenedSink } from "../game/openedZones";
 import { setHandOrderSink, takeHandOrder } from "../game/handOrder";
 import { setLineShapeSink, takeLineShapes } from "../game/lineShapeState";
+import { setNewHeadwaySink, takeNewHeadway } from "../game/newHeadway";
+import { setHiddenLinesSink, takeHiddenLines } from "../game/lineVisibility";
 import { hiddenZones, setGameStart } from "../game/realms";
 import { home } from "../game/home";
 import { fitView, holdForGameLoad, loadCannotFinish, markAlive } from "../game/loading";
@@ -25,12 +28,13 @@ import { accountVersion, packArrivals, packRiders } from "../game/boarding";
 import { ask, designSpeed, guideFinished, lineDraft, selection, tool } from "../game/ui";
 import { flipSites, rightHand, say, setEditSink, world, worldIsRows } from "../game/world";
 import type { LineInput, LineStats, StationInput, TrackEdge, TrackNode, WorldView } from "../game/types";
-import type { ClockLine, ClockState, EditOp, FromClock, NetworkSnapshot, PiInput, RouteAsk, RouteEnd, StationAt, ToClock } from "./protocol";
+import type { ClockLine, ClockState, EditOp, FromClock, NetworkSnapshot, PiInput, RouteAsk, StationAt, ToClock } from "./protocol";
 import { anchorVersion } from "../map/anchorVersion";
 import { mergeNet, type NetworkBuffers } from "../map/network";
 import { bandTry, perfOff } from "../perfFlags";
 import { anchor, anchorWanted, EARTH_C, HOME_ANCHOR, makeAnchor, setAnchor, type Anchor } from "../map/geo";
-import { decodeSave, readStored, writePending, type GuideSave, type NewGameSpec, type PendingLoad, type SaveSlot } from "./saveFile";
+import { loadFailText } from "../game/loadText";
+import { decodeSave, isDamagedError, isUncheckedError, readStored, writePending, type GuideSave, type NewGameSpec, type PendingLoad, type SaveSlot } from "./saveFile";
 import type { CloudContext } from "./cloud";
 import type { FrameSpec } from "../game/frame";
 import { dataUrl, TERRAIN_BASE } from "../game/dataBase";
@@ -185,8 +189,10 @@ function samePaths(a: readonly ClockState["lines"][number][], b: readonly ClockS
   for (let i = 0; i < a.length; i++) {
     const x = a[i], y = b[i];
     if (x === y) continue;
-    if (x.id !== y.id || x.path.length !== y.path.length) return false;
+    const xb = x.back ?? [], yb = y.back ?? [];
+    if (x.id !== y.id || x.path.length !== y.path.length || xb.length !== yb.length) return false;
     for (let k = 0; k < x.path.length; k++) if (x.path[k] !== y.path[k]) return false;
+    for (let k = 0; k < xb.length; k++) if (xb[k] !== yb[k]) return false;
   }
   return true;
 }
@@ -205,7 +211,8 @@ function edgesOf(s: ClockState): TrackEdge[] {
       edgeLines = new Map<number, string[]>();
       for (const l of s.lines) {
         let ids = lineEdgeIds.get(l);
-        if (!ids) lineEdgeIds.set(l, ids = [...new Set(l.path.map((p) => p >> 1))]);
+        // T-3101: a way back that takes other track counts too
+        if (!ids) lineEdgeIds.set(l, ids = [...new Set(l.path.concat(l.back ?? []).map((p) => p >> 1))]);
         const id = String(l.id);
         for (const p of ids) {
           const v = edgeLines.get(p);
@@ -235,7 +242,7 @@ function edgesOf(s: ClockState): TrackEdge[] {
     const v = j >= 0 ? lastViews[j] : undefined;
     if (v && sameObjects(v.lines, ls)) return v;
     return {
-      id: e.id, a: e.a, b: e.b, tracks: e.tracks, built: e.built, off: e.off, hsr: e.hsr, kind: e.kind || undefined, oneWay: e.oneWay || undefined, join: e.join || undefined, setWay: e.setWay || undefined, autoWay: e.autoWay || undefined, crossover: e.crossover, partner: e.partner, lengthM: e.lengthM, cost: e.cost * 1e6, vminKmh: e.vminKmh,
+      id: e.id, a: e.a, b: e.b, tracks: e.tracks, built: e.built, off: e.off, hsr: e.hsr, kind: e.kind || undefined, oneWay: e.oneWay || undefined, join: e.join || undefined, setWay: e.setWay || undefined, autoWay: e.autoWay || undefined, crossover: e.crossover, partner: e.partner, lengthM: e.lengthM, cost: e.cost * 1e6, vminKmh: e.vminKmh, limit: e.limit || undefined,
       levelMin: e.levelMin as any, levelMax: e.levelMax as any, lines: ls === none ? [] : ls,
     };
   });
@@ -301,6 +308,7 @@ function toWorld(s: ClockState): WorldView {
       stretches: Array.from({ length: l.stretchSpeeds.length / 3 }, (_, k) => ({ reached: l.stretchSpeeds[3 * k], limit: l.stretchSpeeds[3 * k + 1], why: l.stretchSpeeds[3 * k + 2] })),
       stopS: l.stopS,
       path: l.path,
+      ...(l.back?.length ? { back: l.back } : {}),
       dwellS: l.dwell,
       turnaroundS: l.turnaround,
       shift: l.shift,
@@ -308,10 +316,13 @@ function toWorld(s: ClockState): WorldView {
       reversals: l.reversals,
       endTurns: l.endTurns,
       oneWayAt: Object.fromEntries(Array.from({ length: l.ways.length >> 1 }, (_, k) => [String(l.ways[2 * k]), l.ways[2 * k + 1]])),
+      ...(l.backStops?.length ? { backStops: l.backStops.map(String) } : {}),
       hand: l.hand,
       loop: l.loopKind === 1 ? "circle" : l.loopKind === 2 ? "balloon" : null, // i18n-ignore
       oneWay: l.oneWay,
       limit: l.limit,
+      ...(l.weekend ? { weekend: l.weekend } : {}),
+      ...(l.restTph ? { restTph: l.restTph } : {}),
       ...(l.pairs ? { pairs: l.pairs } : {}),
       ...(l.twinOf !== undefined ? { twinOf: String(l.twinOf) } : {}),
       ...(l.bus ? { bus: l.bus } : {}),
@@ -426,7 +437,7 @@ export async function importGame(file: File, version?: { origin: string; edit: n
  * when the file cannot open. */
 export async function fileChoice(file: File, version?: { origin: string; edit: number }, warn?: boolean): Promise<GameChoice | string | { warn: string }> {
   const bytes = new Uint8Array(await file.arrayBuffer());
-  try { await decodeSave(bytes); } catch { return t("clockClient.notSave"); }
+  try { await decodeSave(bytes); } catch (err) { return isDamagedError(err) ? t("clockWorker.saveDamaged") : isUncheckedError(err) ? loadFailText(String(err)) : t("clockClient.notSave"); }
   const why = await saveRefusal({ bytes }, warn);
   if (why) return why.soft ? { warn: why.text } : why.text;
   if (!await writePending({ kind: "import", bytes, name: file.name.replace(/\.save$/i, ""), from: "", ...version })) return t("clockClient.noStorage");
@@ -439,14 +450,20 @@ export async function backupChoice(key: string, from: string): Promise<GameChoic
   if (!await writePending({ kind: "restore", key, from })) return t("clockClient.noStorage");
   return { pending: true };
 }
-/** Start a new game in a new slot (T-743), named after its start (T-728) unless `name` is given. */
-export function newGame(game?: NewGameSpec, name = "") {
+/** Start a new game in a new slot (T-743), named after its start (T-728) unless `name` is given. T-3478: the
+ * game in hand is saved and the page goes to the start menu (`?next=new`), which starts the new game as its
+ * own New game does, so a start that fails ends there, never in the game left. */
+export function newGame(game?: NewGameSpec, name = "", at?: { center: [number, number]; zoom: number } | null) {
   const spec = game ?? { mode: "normal" };
-  switchGame({ load: "new", mode: spec.mode, ...(spec.start ? { city: spec.start } : {}), ...(spec.real ? { real: "1" } : {}) }, { kind: "new", spec, name });
+  switchGame({ next: "new", mode: spec.mode, ...(spec.start ? { city: spec.start } : {}), ...(spec.real ? { real: "1" } : {}), ...(at ? { at: [...at.center, at.zoom].join(",") } : {}) }, { kind: "new", spec, name });
+}
+/** T-3479: fetch the terrain that failed again now. */
+export function retryGround() {
+  current?.post({ kind: "retryGround" });
 }
 
 /** T-1196: the URL switches that say which game a page opens (ui/StartMenu.tsx `choiceFromUrl`) */
-export const CHOICE_PARAMS = ["new", "city", "mode", "synth", "demandTest", "continue", "slot", "load", "real"];
+export const CHOICE_PARAMS = ["new", "city", "mode", "synth", "demandTest", "continue", "slot", "load", "real", "next", "at"];
 /** This page's URL with `params` in place of its game switches; none: the start menu (`?paused=1`, a
  * check's paused clock, stays with a game and goes with the menu). */
 export function pageWith(params: Record<string, string>): string {
@@ -589,6 +606,8 @@ export class ClockClient {
   /** T-3313: when the last hour of trips came, and the worker's last error, for a feedback report */
   private tripsAt = NaN;
   private lastTrouble = "";
+  /** T-3628: the ground downloads (masks, terrain) that failed, with their errors, at most 5 */
+  private groundWhy: string[] = [];
   /** T-3313: one line for a feedback report: the oldest unanswered edit or read and its age, how many wait
    * behind it, the last trips' age, the last error (seconds) */
   diagnosis(): string {
@@ -597,6 +616,7 @@ export class ClockClient {
       first ? `oldest unanswered ${first.what} ${Math.round((now - first.at) / 1000)}s, ${this.sent.size} waiting` : "nothing unanswered", // i18n-ignore
       `trips ${Number.isNaN(this.tripsAt) ? "none yet" : Math.round((now - this.tripsAt) / 1000) + "s ago"}`, // i18n-ignore
       `status ${clockWorkerStatus.peek()}`,
+      this.groundWhy.length ? `ground failed ${this.groundWhy.join(", ")}` : "", // i18n-ignore
       this.lastTrouble ? `last error ${this.lastTrouble.slice(0, 200)}` : "", // i18n-ignore
     ].filter(Boolean).join("; ");
   }
@@ -608,7 +628,6 @@ export class ClockClient {
   private crossovers = new Newest<{ edge: number; x: number; y: number }, [a: CrossoverAnswer]>();
   private previews = new Newest<(seq: number) => ToClock, [a: PreviewAnswer]>();
   /** whether a preview is in flight (read by checks) */
-  private get previewBusy() { return this.previews.busy; }
   private epoch = NaN;
   private sawSlots = false;
   /** the last game load: where it came from and whether its save was converted to the world frame
@@ -617,7 +636,7 @@ export class ClockClient {
   /** the renderer's hooks, set by main.ts */
   onState: (s: ClockState) => void = () => {};
   /** T-2159: the network diagram's graph, while the diagram is shown (diagram/view.ts) */
-  onDiagram: (g: DiagramGraph) => void = () => {};
+  onDiagram: (graphs: DiagramGraph[]) => void = () => {};
   /** `board`: the boarding account's hour (T-164, game/boarding.ts), once demand has riders */
   onTrips: (epoch: number, version: number, trips: Float32Array, board?: Float32Array, ends?: Float32Array, nexts?: Float32Array, bays?: Float32Array) => void = () => {};
   /** the boarding account's last hours: ms in the worker for the hour, lines worked out again
@@ -701,6 +720,7 @@ export class ClockClient {
   private spawnWorker() {
     const w = new Worker(new URL("./clock.worker.ts", import.meta.url), { type: "module" });
     this.worker = w;
+    attachClockTrace(w);
     this.booted = false;
     w.onmessage = (e: MessageEvent<FromClock>) => this.arrive(e.data);
     w.onerror = (e) => {
@@ -736,6 +756,8 @@ export class ClockClient {
     setDemandFineSink((zones, built) => this.post({ kind: "demandFine", zones, built }));
     setHandOrderSink((kind, ids) => this.post({ kind: "listOrder", list: kind === "lines" ? 0 : 1, ids }));
     setLineShapeSink((line, shape) => this.post({ kind: "lineShape", line, shape }));
+    setHiddenLinesSink((lines) => this.post({ kind: "hideLines", lines }));
+    setNewHeadwaySink((seconds) => this.post({ kind: "newHeadway", seconds }));
     current = this;
     // The worker settles money from the clock (T-028, T-284): tell it each time the
     // clock is set, paused, resumed or sped up.
@@ -926,6 +948,7 @@ export class ClockClient {
   private posts = 0;
   private readsOut = new Map<string, { posts: number; p: Promise<Float64Array> }>();
   post(msg: ToClock, transfer: Transferable[] = []) {
+    if (tracing() && msg.kind === "edit") trace("clock-post", { seq: msg.seq, edit: editTrace(msg.op) });
     this.posts++;
     if (this.worker && this.booted) this.worker.postMessage(msg, transfer);
     else this.waiting.push([msg, transfer]);
@@ -1011,6 +1034,8 @@ export class ClockClient {
   /** A state expected to freeze the page past BUSY_MS here (a big network, or one redrawn at a new
    * draw anchor) waits a frame with the busy tag up; every message after it waits behind it. */
   private arrive(msg: FromClock) {
+    if (msg.kind === "edited") trace("clock-answer", { seq: msg.seq, ok: msg.ok, ms: msg.ms });
+    if (msg.kind === "error") trace("clock-error", msg.message);
     if (this.deferred) { this.deferred.push(msg); return; }
     if (msg.kind === "state" && !this.stateBusy) {
       const st = msg.state;
@@ -1091,6 +1116,13 @@ export class ClockClient {
   }
 
   private receive(msg: FromClock) {
+    const watched = tracing() && (msg.kind === "state" || msg.kind === "trips");
+    if (watched) trace("receive-start", { kind: msg.kind });
+    const start = performance.now();
+    try { return this.receiveMessage(msg); }
+    finally { if (watched) trace("receive-end", { kind: msg.kind, ms: performance.now() - start }); }
+  }
+  private receiveMessage(msg: FromClock) {
     // T-648: the worker posts a state's trips right after it, before anything else. The state waits
     // for them, so its world, network and trips are taken in one task: no frame draws the old trips
     // on the new run profiles (trains jumped, or stayed a frame on a line that had lost its service),
@@ -1141,7 +1173,7 @@ export class ClockClient {
         setMoneyState(msg.money);
         break;
       case "diagramGraph":
-        this.onDiagram(msg.graph);
+        this.onDiagram(msg.graphs);
         break;
       case "cash": // T-284: fares landing, running costs draining
         liveMoney.value = { cash: msg.cash, today: msg.today, hour: msg.hour, regions: msg.regions };
@@ -1156,6 +1188,12 @@ export class ClockClient {
         break;
       case "lineShapes":
         takeLineShapes(msg.shapes);
+        break;
+      case "newHeadway":
+        takeNewHeadway(msg.seconds);
+        break;
+      case "hiddenLines":
+        takeHiddenLines(msg.lines);
         break;
       case "stationsAhead":
         stationsAheadSink?.(msg.frame, msg.xy, msg.fine, msg.built, msg.home);
@@ -1177,6 +1215,7 @@ export class ClockClient {
         break;
       case "ground":
         groundNet.value = { pending: msg.pending, failed: msg.failed };
+        this.groundWhy = msg.why;
         break;
       case "roads":
         for (const f of roadsListeners) f();

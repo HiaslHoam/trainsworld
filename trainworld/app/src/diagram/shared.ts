@@ -3,6 +3,7 @@
 // sixteenths of a px. No water, borders or city names: the format has none.
 
 import type { Drawing } from "./draw";
+import { compressGzip } from "../workers/gzip";
 import { levelAt, type LevelNames, type NamePlan } from "./names";
 
 export interface SharedDrawing {
@@ -16,7 +17,7 @@ export interface SharedDrawing {
 
 const PITCH = 256, PX = 16, MAX_PX = 1 << 16, MAX_COLOURS = 256, NAME_CHARS = 64;
 /** the server's limits, a little under them */
-const MAX_GZIP = 500 * 1024, MAX_RAW = 4 * 1024 * 1024 - 1024;
+const MAX_GZIP = 1000 * 1024, MAX_RAW = 8 * 1024 * 1024 - 1024;
 /** Which name levels go up, as a pitch in CSS px, most first (at most 8); a big network drops down the list until it fits. A
  * level's names stay clear at every zoom above it, so leaving levels out only means fewer names at some zooms. */
 const LEVEL_TIERS = [[1.76, 2.95, 4.2, 5.9, 8.4, 11.8, 16.7, 28.1], [2.95, 4.2, 7.1, 11.8, 16.7, 28.1], [2.95, 4.2, 8.4, 16.7], [4.2, 11.8], []];
@@ -86,8 +87,7 @@ export function encodeShared(d: Drawing, plan: NamePlan, tier: number): SharedDr
 
 async function gzipJson(v: unknown): Promise<{ blob: Blob; raw: number }> {
   const raw = new TextEncoder().encode(JSON.stringify(v));
-  const stream = new Blob([raw]).stream().pipeThrough(new CompressionStream("gzip"));
-  return { blob: await new Response(stream).blob(), raw: raw.length };
+  return { blob: new Blob([await compressGzip(raw)]), raw: raw.length };
 }
 
 /** the upload's gzipped JSON, with as many name levels as fit; null when not even the lines alone do */

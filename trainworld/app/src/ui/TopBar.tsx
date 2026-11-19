@@ -22,7 +22,7 @@ import { t, tList, tNumber, tSpaced } from "../i18n";
 import { tPlace } from "../i18n/places";
 import { world } from "../game/world";
 import { liveMoney, moneyState } from "../game/money";
-import { pointsPast24h, pointsPerDay, pointsShort } from "../game/points";
+import { pointsScore, pointsShort } from "../game/points";
 import { Icon } from "./widgets";
 import { perfOff } from "../perfFlags";
 import { manageSaveSlot, saveSlotsState } from "../workers/clockClient";
@@ -149,7 +149,8 @@ function Clock() {
   const todayHols = holidayLines(minute, near, false).filter((l) => l.today).map((l) => l.text);
   const dateTip = t("topBar.dateTip", { weekday: t("topBar.weekday", { day: WEEKDAY_KEYS[weekdayOf(day)] }), month: MONTH_LONG[month], date, year: yearOf(day), day });
   return (
-    <div class="clock">
+    // T-3635: a page translator rewriting the date's text can break the holiday dot's diff and leave stale clocks behind
+    <div class="clock" translate={false}>
       <div class="clock-text" data-tip={held ? t("topBar.clockHeld") : [dateTip, ...todayHols].join("\n")}>
         <b class={"time lg" + (held ? " held" : "")}>{clockTime(minute)}</b>
         <span class="date"><HolidayDot today={todayHols.length > 0} />{dateName(day)}</span>
@@ -185,12 +186,11 @@ function Cash() {
   return <div class={"cash num" + (usingUsd() ? "" : " cash-wide") + (shown.startsWith("−") ? " money-neg" : "")} data-tip={m ? [...(tip ? [tip] : []), t("moneyTab.scaleTip")].join("\n") : undefined}>{shown}</div>;
 }
 
-/** The city's name, the whole of it and its points (T-684, T-694: the past 24 game hours') on hover. */
+/** The city's name, the whole of it and its points (T-684, T-3465: its forecast weekday's) on hover. */
 function CityName({ id, name, tip }: { id: string | null; name: string; tip?: string }) {
-  const past = id ? pointsPast24h.value.get(id) : undefined;
-  const rate = id ? pointsPerDay.value.get(id)?.[shownDay.value] : undefined;
+  const score = id ? pointsScore.value.get(id) : undefined;
   const lines = [name];
-  if (id && (past || rate)) lines.push(t("topBar.pointsPast", { count: exact(past ?? 0) }), t("topBar.pointsNow", { count: exact(rate ?? 0), day: shownDayOn.value }));
+  if (id && score) lines.push(t("topBar.pointsPast", { count: exact(score) }));
   return <div class="city" data-tip={tip ?? (id ? lines.join("\n") : undefined)}>{name}</div>;
 }
 

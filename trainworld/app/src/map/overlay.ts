@@ -14,6 +14,7 @@
 
 import type { Map as MlMap } from "maplibre-gl";
 import { clock } from "../game/clock";
+import { tracePhase } from "../game/freezeTrace";
 import { watchGraphics } from "../game/loading";
 import type { DrawOptions, NetworkRenderer } from "./renderer";
 import { anchor, EARTH_C, toLocal } from "./geo";
@@ -28,6 +29,9 @@ const THROTTLE = !perfOff("moving");
 
 /** Frame interval while the window is visible but does not have focus. */
 const UNFOCUSED_MS = 100;
+/** Whether the network's canvas is multisampled: only below pixel ratio 3, the screen's own as well as the one drawn
+ * at (T-955; T-3497: a 3x phone drawn at a capped 2 had it back; ?perfOff=msaa turns it off everywhere, to measure) */
+export const msaaHere = (drawn: number) => drawn < 3 && (devicePixelRatio || 1) < 3 && !perfOff("msaa");
 /** ?perfOff=stillThrottle (T-1640, measurement only): redraw every frame while the clock runs. */
 const STILL_THROTTLE = !perfOff("stillThrottle");
 /** A redraw due sooner than this is a frame, not a timer. */
@@ -114,8 +118,9 @@ export class Overlay {
     this.canvas.className = "overlay";
     map.getContainer().appendChild(this.canvas);
     // a stencil for the track drawn through the station boxes (T-236, renderer.ts). MSAA only below dpr 3: the
-    // strokes' side edges rely on it, and at dpr 3 its 4x buffers cost about 80 MB on a phone (T-955)
-    const gl = this.canvas.getContext("webgl2", { antialias: map.getPixelRatio() < 3, premultipliedAlpha: true, alpha: true, stencil: true });
+    // strokes' side edges rely on it, and at dpr 3 its 4x buffers cost about 80 MB on a phone (T-955). T-3497: by
+    // the screen's own ratio too, so a 3x phone drawn at a capped 2 (T-2794) goes without (about 70 MB less)
+    const gl = this.canvas.getContext("webgl2", { antialias: msaaHere(map.getPixelRatio()), premultipliedAlpha: true, alpha: true, stencil: true });
     if (!gl) throw new Error("no WebGL2");
     this.gl = gl;
     renderer.init(gl);
@@ -146,7 +151,7 @@ export class Overlay {
           if (this.moving && this.lastMapFrame) this.onMovingFrame?.(t - this.lastMapFrame);
           this.lastMapFrame = this.moving ? t : 0;
           this.draw();
-          for (const f of this.afterMapFrame) f();
+          for (let i = 0; i < this.afterMapFrame.length; i++) tracePhase(`map-frame-hook-${i}`, this.afterMapFrame[i]);
           // the view may have changed what moves: zoomed in to the trains, say
           if (this.slowTimer && !this.rafId) this.replan();
         },
@@ -202,6 +207,9 @@ export class Overlay {
 
   /** Draw now with the camera MapLibre last drew. */
   draw() {
+    return tracePhase("map-overlay", () => this.drawFrame());
+  }
+  private drawFrame() {
     if (!this.cam || !this.renderer.net) return;
     const a = performance.now();
     const gl = this.gl;

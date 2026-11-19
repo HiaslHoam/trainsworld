@@ -1,17 +1,20 @@
-// A station's suggested names (T-065, T-534): the nearest cross street on the basemap, a small
+// A station's suggested names (T-065, T-534): a real station it stands on (T-3571), the nearest cross street on the basemap, a small
 // neighbourhood from the city's place list (game/placeList.ts), and the city or town. A new
 // station takes the first there is; the station inspector's cycle button steps through them.
-// Worked out when asked, never stored.
+// Worked out when asked, never stored. Each is in the player's script where it can be (T-3631).
 
 import type { Geometry } from "geojson";
 import type { Map as MlMap } from "maplibre-gl";
 import { compass } from "../game/places";
 import { M_PER_DEG, M_PER_DEG_LAT } from "../game/frame";
-import { hoodsNear, placesNear, townsNear, type NearPlace } from "../game/placeList";
+import { countryAt, hoodsNear, placesNear, stationPlaceName, townsNear, type NearPlace } from "../game/placeList";
+import { language } from "../i18n";
+import { nativeCompass, nativeLang, nativeNumbered, nativeStation, readable, stationForm } from "../i18n/nativeNames";
 import { toLngLat, toLocal } from "./geo";
 import type { NetworkBuffers } from "./network";
 import { edgesNear } from "./snapIndex";
 import { whenIdle } from "./cellIndex";
+import { realStationName } from "./realStations";
 
 /** From this zoom the basemap's tiles carry street names. */
 export const STREET_NAME_ZOOM = 13;
@@ -23,6 +26,8 @@ const PARALLEL_DEG = 30;
 const PLACE_SLACK_M = 800;
 
 export interface Suggestions {
+  /** T-3571: the real station within NAME_M (map/realStations.ts), the first choice */
+  real: string | null;
   street: string | null;
   hood: string | null;
   town: string | null;
@@ -167,7 +172,14 @@ export function warmStreetNames(map: MlMap) {
 }
 
 
-const nameOf = (p: Record<string, any>) => (p?.["name:latin"] || p?.name_en || p?.name) as string | undefined;
+/** A basemap feature's name: in the player's script where the tiles' own name is in it (T-3631), else Latin. */
+function nameOf(p: Record<string, any>, place?: { kind: string; country: string | undefined }): { name: string; native: boolean } | null {
+  const lang = nativeLang(language.peek());
+  const own = lang ? readable(p?.name, lang) ?? readable(p?.["name:nonlatin"], lang) : null;
+  if (own) return nativeStation(own) ? null : { name: place ? stationForm(own, place.kind, place.country) : own, native: true };
+  const latin = (p?.["name:latin"] || p?.name_en || p?.name) as string | undefined;
+  return latin ? { name: latin, native: false } : null;
+}
 
 /** A name that ends in "station" ("Light Rail Station", "Penn Sta.", "Stn") is a stop's own label
  * in OSM, and never a suggestion, unless it is a settlement's name (Huntington Station, a real
@@ -205,8 +217,9 @@ function crossStreet(map: MlMap, lng: number, lat: number, track: [number, numbe
   const best = new Map<string, { d: number; dir: [number, number] | null }>();
   for (const f of features(map, "transportation_name", lng, lat, STREET_M)) {
     const raw = nameOf(f.properties);
-    if (!raw || f.properties?.class === "motorway" || endsInStation(raw)) continue;
-    const name = shorten(raw), n = nearestOn(f.geometry, lng, lat);
+    // a station's own footbridge or exit (保土ヶ谷駅東口歩道橋) is no street to name one after
+    if (!raw || f.properties?.class === "motorway" || endsInStation(raw.name) || /[駅驛站].*(歩道橋|陸橋|天桥|天橋|通路|口)$/.test(raw.name)) continue;
+    const name = raw.native ? raw.name : shorten(raw.name), n = nearestOn(f.geometry, lng, lat);
     if (n.d <= STREET_M && n.d < (best.get(name)?.d ?? Infinity)) best.set(name, n);
   }
   const sinMax = Math.sin((PARALLEL_DEG * Math.PI) / 180);
@@ -221,30 +234,40 @@ function crossStreet(map: MlMap, lng: number, lat: number, track: [number, numbe
 function tilePlace(map: MlMap, lng: number, lat: number, taken: Set<string>): string | null {
   const kinds = ["neighbourhood", "quarter", "suburb", "village", "hamlet", "town"];
   const best = new Map<string, number>();
+  const country = countryAt(lng, lat);
   for (const f of features(map, "place", lng, lat, 1200)) {
-    const raw = nameOf(f.properties);
-    if (!raw || !kinds.includes(f.properties?.class) || endsInStation(raw, f.properties?.class)) continue;
-    const name = shorten(raw), d = nearestOn(f.geometry, lng, lat).d;
+    const kind = f.properties?.class;
+    if (!kinds.includes(kind)) continue;
+    const raw = nameOf(f.properties, { kind, country });
+    if (!raw || endsInStation(raw.name, kind)) continue;
+    const name = raw.native ? raw.name : shorten(raw.name), d = nearestOn(f.geometry, lng, lat).d;
     if (d <= 1200 && d < (best.get(name) ?? Infinity)) best.set(name, d);
   }
   return [...best].sort((a, b) => a[1] - b[1]).map((e) => e[0]).find((n) => !taken.has(n)) ?? null;
 }
 
 /** The suggestions for a station at (lng, lat) whose track runs along `track`; `taken` holds the
- * other stations' names, which each suggestion avoids. */
-export async function suggestNames(map: MlMap, lng: number, lat: number, track: [number, number] | null, taken: () => Set<string>): Promise<Suggestions> {
+ * other stations' names, which each suggestion avoids. `real`: look for a real station (not for a
+ * ferry port); `waitReal`: fetch the region's real stations first rather than use only those loaded. */
+export async function suggestNames(map: MlMap, lng: number, lat: number, track: [number, number] | null, taken: () => Set<string>, real = true, waitReal = false): Promise<Suggestions> {
   const street = crossStreet(map, lng, lat, track, taken());
-  const [listed, listedTowns] = await Promise.all([placesNear(lng, lat).catch(() => []), townsNear(lng, lat).catch(() => [])]);
+  const [listed, listedTowns, realName] = await Promise.all([
+    placesNear(lng, lat).catch(() => []),
+    townsNear(lng, lat).catch(() => []),
+    real ? realStationName(lng, lat, taken(), waitReal).catch(() => null) : null,
+  ]);
   const keep = (n: NearPlace) => !endsInStation(n.place.name, n.place.kind);
   const near = listed.filter(keep), towns = listedTowns.filter(keep);
   const t = taken(); // a station added meanwhile counts
-  return { street, hood: placeName(hoodsNear(near), t), town: placeName(towns, t), near };
+  return { real: realName && !t.has(realName) ? realName : null, street, hood: placeName(hoodsNear(near), t), town: placeName(towns, t), near };
 }
 
-/** A new station's name: the cross street, else a small neighbourhood, else the nearest place on
- * the list, else a place on the tiles, else "Station N". */
-export async function newStationName(map: MlMap, lng: number, lat: number, track: [number, number] | null, taken: () => Set<string>): Promise<string> {
-  const s = await suggestNames(map, lng, lat, track, taken);
+/** A new station's name: the real station it stands on (T-3571), else the cross street, else a small
+ * neighbourhood, else the nearest place on the list, else a place on the tiles, else "Station N".
+ * `real` false for a ferry port, which a railway station's name would not fit. */
+export async function newStationName(map: MlMap, lng: number, lat: number, track: [number, number] | null, taken: () => Set<string>, real = true): Promise<string> {
+  const s = await suggestNames(map, lng, lat, track, taken, real);
+  if (s.real) return s.real;
   if (s.street) return s.street;
   if (s.hood) return s.hood;
   const t = taken();
@@ -258,8 +281,8 @@ export async function newStationName(map: MlMap, lng: number, lat: number, track
  * `current` is none of them); null when there is nothing else to offer. */
 export async function nextSuggestion(map: MlMap, lng: number, lat: number, current: string, taken: () => Set<string>, net: NetworkBuffers | null): Promise<string | null> {
   const [lx, ly] = toLocal(lng, lat, net?.anchor);
-  const s = await suggestNames(map, lng, lat, trackDirection(net, lx, ly), taken);
-  const list = [...new Set([s.street, s.hood, s.town].filter((n): n is string => !!n))];
+  const s = await suggestNames(map, lng, lat, trackDirection(net, lx, ly), taken, true, true);
+  const list = [...new Set([s.real, s.street, s.hood, s.town].filter((n): n is string => !!n))];
   if (!list.length) return null;
   const next = list[(list.indexOf(current) + 1) % list.length];
   return next === current ? null : next;
@@ -272,15 +295,17 @@ export async function nextSuggestion(map: MlMap, lng: number, lat: number, curre
  */
 export function placeName(near: NearPlace[], taken: Set<string>): string | null {
   if (!near.length) return null;
-  const first = near[0];
-  const free = near.find((n) => n.d <= first.d + PLACE_SLACK_M && !taken.has(n.place.name));
-  if (free) return free.place.name;
+  const first = near[0], name = stationPlaceName(first.place);
+  const free = near.find((n) => n.d <= first.d + PLACE_SLACK_M && !taken.has(stationPlaceName(n.place)));
+  if (free) return stationPlaceName(free.place);
+  const asked = nativeLang(language.peek()), lang = asked && readable(name, asked) === name ? asked : null;
   if (first.d > 150) {
     const way = compass(first.dx, first.dy);
-    const named = `${way[0].toUpperCase()}${way.slice(1)} ${first.place.name}`;
-    if (!taken.has(named)) return named;
+    const named = lang ? nativeCompass(name, first.dx, first.dy, lang) : `${way[0].toUpperCase()}${way.slice(1)} ${name}`;
+    if (named && !taken.has(named)) return named;
   }
-  for (let k = 2; ; k++) if (!taken.has(`${first.place.name} ${k}`)) return `${first.place.name} ${k}`;
+  const numbered = (k: number) => (lang ? nativeNumbered(name, k) : `${name} ${k}`);
+  for (let k = 2; ; k++) if (!taken.has(numbered(k))) return numbered(k);
 }
 
 /** "West 42nd Street" -> "W 42nd St". */

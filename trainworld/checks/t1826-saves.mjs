@@ -12,7 +12,7 @@ import { readFile } from 'node:fs/promises';
 import { launchChrome, collectErrors, importSave, acrossLine, ANGLE } from './lib.mjs';
 
 const BASE = process.argv[2] ?? 'http://localhost:6189/';
-const NEWER = 'This game was saved by a newer version. Reload the page to update.';
+const NEWER = 'This game was saved on a newer game version. Reload the page to update.';
 
 let failed = false;
 const report = (name, ok, detail) => { failed ||= !ok; console.log(`${ok ? 'PASS' : 'FAIL'}  ${name}  ${detail}`); };
@@ -120,7 +120,9 @@ try {
     await sf.deleteSlot(key);
     return { list, at: now.at };
   }, home);
-  report('a pull from the account leaves a backup', pulled.at === 2000 && pulled.list.length === 1 && pulled.list[0].pull && pulled.list[0].at === 1000, `(${JSON.stringify(pulled)})`);
+  // T-3395: a whole pull newer than the slot's good copy (none here) is its good copy too
+  const pulls = pulled.list.filter((b) => !b.good);
+  report('a pull from the account leaves a backup', pulled.at === 2000 && pulls.length === 1 && pulls[0].pull && pulls[0].at === 1000 && pulled.list.some((b) => b.good && b.at === 1000), `(${JSON.stringify(pulled)})`);
 
   // ---- 3a. a change autosave will write: no question on close
   await fares(a, 3.1);
