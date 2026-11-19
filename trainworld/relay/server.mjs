@@ -9,11 +9,13 @@
 // Settings (environment): PORT (8787), BIND (127.0.0.1), TW_INVITES, TW_SECRET (signs the cookie; random per start
 // if unset), TW_LOGIN_PATH (/login: make it a secret), TW_SECURE=1 (cookie only over https), TW_TRUST_PROXY=1 (take
 // the client address from X-Forwarded-For), TW_ORIGINS (extra browser origins allowed to call the API, for a dev
-// page on another port), TW_GRACE_S (how long a room outlives its host's connection, 90).
+// page on another port), TW_GRACE_S (how long a room outlives its host's connection, 90). With TW_STATIC_DIR the
+// relay serves the built game and the cached game data too (files.mjs), so a router-only proxy needs one service.
 
 import http from "node:http";
 import crypto from "node:crypto";
 import { WebSocketServer } from "ws";
+import { serveGame } from "./files.mjs";
 
 const env = process.env;
 const PORT = Number(env.PORT ?? 8787), BIND = env.BIND ?? "127.0.0.1";
@@ -177,6 +179,8 @@ const server = http.createServer(async (req, res) => {
     closeRoom(r, "closed by host");
     return json(res, 200, {});
   }
+  // the game itself and its data (files.mjs), for friends only
+  if (await serveGame(req, res, path)) return;
   notFound(res);
 });
 
