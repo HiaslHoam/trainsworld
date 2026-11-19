@@ -22,6 +22,7 @@ import { t } from "../i18n";
 import { coopLoad, exportForShare, gamesLoaded, setCoopGameHooks, type EditAnswer } from "../workers/clockClient";
 import type { EditOp } from "../workers/protocol";
 import { clock, SPEEDS } from "./clock";
+import { openTransport, type CoopTransport } from "./coopTransport";
 import { applyRemoteEdit, edit, say, setCoopHooks } from "./world";
 
 type Role = "host" | "guest";
@@ -57,7 +58,7 @@ export const coopStatus = signal<"idle" | "syncing" | "waitingHost" | "hostReloa
 export const coopGuests = signal(0);
 
 let me: Stored | null = null;
-let channel: BroadcastChannel | null = null;
+let channel: CoopTransport | null = null;
 
 function read(): Stored | null {
   try {
@@ -74,7 +75,7 @@ function write() {
   } catch { /* storage unavailable: the role lasts until the next reload */ }
 }
 function post(m: Msg) {
-  channel?.postMessage(m);
+  channel?.send(m);
 }
 const loaded = () => gamesLoaded.peek() > 0;
 
@@ -259,12 +260,12 @@ async function onGuest(m: Msg) {
 
 function listen() {
   if (channel) return;
-  channel = new BroadcastChannel(CHANNEL);
-  channel.onmessage = (e: MessageEvent<Msg>) => {
-    const m = e.data;
+  channel = openTransport(CHANNEL);
+  channel.onMessage((data) => {
+    const m = data as Msg;
     if (!me || m.from === me.id) return;
     void (me.role === "host" ? onHost(m) : onGuest(m));
-  };
+  });
 }
 
 function begin(stored: Stored) {
