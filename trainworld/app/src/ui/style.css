@@ -2153,3 +2153,7 @@ html.ui-hidden .ui-hint.on { display: block; }
 .find-clear:hover { color: var(--text); }
 .find-icon { position: absolute; left: 8px; top: 50%; transform: translateY(-50%); display: grid; place-items: center; color: var(--muted); pointer-events: none; }
 .find-box.with-icon > input { padding-left: 28px; }
+.coop-panel .coop-online { display: flex; flex-direction: column; gap: 6px; flex-basis: 100%; align-items: stretch; border-top: 1px solid var(--line, rgba(0, 0, 0, 0.15)); padding-top: 8px; }
+.coop-panel .coop-online input { font: inherit; padding: 4px 6px; min-width: 0; }
+.coop-panel .coop-host-row, .coop-panel .coop-game { display: flex; gap: 6px; align-items: center; justify-content: space-between; }
+.coop-panel .coop-host-row input { flex: 1; }

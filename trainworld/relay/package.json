@@ -1,0 +1,9 @@
+{
+  "name": "trainsworld-relay",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Private co-op relay and lobby for a friends-only trainsworld server",
+  "scripts": { "start": "node server.mjs", "test": "node test.mjs" },
+  "dependencies": { "ws": "^8.18.0" }
+}

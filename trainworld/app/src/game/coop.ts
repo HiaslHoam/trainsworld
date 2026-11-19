@@ -22,7 +22,8 @@ import { t } from "../i18n";
 import { coopLoad, exportForShare, gamesLoaded, setCoopGameHooks, type EditAnswer } from "../workers/clockClient";
 import type { EditOp } from "../workers/protocol";
 import { clock, SPEEDS } from "./clock";
-import { openTransport, type CoopTransport } from "./coopTransport";
+import { openTransport, resetTransport, type CoopTransport } from "./coopTransport";
+import { relayClosed, restoreRelay } from "./relayTransport";
 import { applyRemoteEdit, edit, say, setCoopHooks } from "./world";
 
 type Role = "host" | "guest";
@@ -266,6 +267,11 @@ function listen() {
     if (!me || m.from === me.id) return;
     void (me.role === "host" ? onHost(m) : onGuest(m));
   });
+  // a lost connection came back: what was sent in between is gone, so say who we are again
+  channel.onReconnect?.(() => {
+    if (me?.role === "guest") hello();
+    else if (me?.role === "host") post({ k: "host", from: me.id, e: me.epoch });
+  });
 }
 
 function begin(stored: Stored) {
@@ -302,6 +308,9 @@ export function resync() {
 
 export function leaveCoop() {
   if (me) post({ k: "bye", from: me.id });
+  channel?.close();
+  channel = null;
+  resetTransport();
   me = null;
   write();
   setCoopHooks(null, null);
@@ -318,6 +327,13 @@ let resyncWhenLoaded = false;
 export function startCoop() {
   // the game's mode and running side: a guest may not change them; the host's change goes to the guests with a sync
   setCoopGameHooks({ guest: () => me?.role === "guest", changed: () => { if (me?.role === "host" && me.epoch > 0) void sync(); } });
+  restoreRelay();
+  // the relay closed the room (its host left): this tab is out of the game
+  relayClosed.subscribe((why) => {
+    if (!why || !me) return;
+    say(t("coop.relayClosed"), true);
+    leaveCoop();
+  });
   let stored = read();
   // only the reloads co-op makes itself carry on where they were; any other reload starts the sync again
   if (stored?.role === "guest") stored = stored.loading ? { ...stored, loading: false } : { ...stored, epoch: 0 };
