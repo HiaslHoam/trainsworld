@@ -1,9 +1,16 @@
 //! Lines (stops, look, cars, trains, loops) and undo.
 
 use super::*;
+use crate::track::net::Extra;
 
 /// T-2987: the lowest speed limit a rail line can be given, km/h.
 const LINE_LIMIT_MIN: u32 = 40;
+
+/// T-3542: five hours as `params::Cuts` (None for another count or an hour past 255).
+fn cuts_of(c: &[u32]) -> Option<Cuts> {
+    let v: Vec<u8> = c.iter().map(|&h| u8::try_from(h).ok()).collect::<Option<_>>()?;
+    v.try_into().ok()
+}
 
 #[wasm_bindgen]
 impl TrackApi {
@@ -11,17 +18,23 @@ impl TrackApi {
     /// Add a line with a whole-line fleet at each demand level.
     #[allow(clippy::too_many_arguments)]
     pub fn set_line_with_trains(&mut self, id: u32, stops: &[u32], high: u32, medium: u32, low: u32, dwell_s: f32, turnaround_s: f32, cars: u8, colour: u32, name: String) -> u32 {
-        let Some((stops, path)) = edited_stops(&self.w.net, stops, false) else {
+        let Some((stops, path)) = edited_stops(&self.w.net, stops, false, &[]) else {
             return self.refuse(Issue::LinePath { line: id });
         };
-        self.run(Op::Line { id, data: Some(LineData { symbol: String::new(), trains: Some([high, medium, low]), auto: None, name, colour, tph: if stops.len() < 2 { [0.0; 3] } else { [6.0, 3.0, 1.0] }, stops, path, dwell_s, turnaround_s, cars, fast: false, bus: None, ferry: None, group: 0, group_name: String::new(), group_look: Default::default(), day: 0, hand: false, one_way: false, limit: 0, twin: Default::default(), weekend: Default::default() }) })
+        let mut d = LineData { rows: 0, x: Default::default(), symbol: String::new(), trains: Some([high, medium, low]), auto: None, name, colour, tph: if stops.len() < 2 { [0.0; 3] } else { [6.0, 3.0, 1.0] }, stops, path, dwell_s, turnaround_s, cars, fast: false, bus: None, ferry: None, group: 0, group_name: String::new(), group_look: Default::default(), day: 0, hand: false, one_way: false, limit: 0, twin: Default::default(), weekend: Default::default(), ones: vec![], fare_dist: false };
+        // T-3542: a line of four or five rows runs its high count at midday and in the afternoon too
+        d.x = Extra::of_high(&d);
+        self.run(Op::Line { id, data: Some(d) })
     }
     /// Change a line's stops, keeping everything else; the path is found again.
     pub fn set_stops(&mut self, id: u32, stops: &[u32]) -> u32 {
         let Some(mut d) = self.w.net.line_data(id) else { return self.refuse(Issue::NoSuchLine { line: id }) };
-        let Some((stops, path)) = edited_stops(&self.w.net, stops, d.hand) else { return self.refuse(Issue::LinePath { line: id }) };
+        let Some((stops, path)) = edited_stops(&self.w.net, stops, d.hand, &d.ones) else { return self.refuse(Issue::LinePath { line: id }) };
         d.stops = stops;
         d.path = path;
+        if !settle_ones(&self.w.net, &mut d) {
+            return self.refuse(Issue::LinePath { line: id });
+        }
         self.run(Op::Line { id, data: Some(d) })
     }
     /// T-2895: the line's stops in the order the player gave, which the line then keeps: no later
@@ -31,10 +44,13 @@ impl TrackApi {
         if d.bus.is_some() || d.ferry.is_some() {
             return self.refuse(Issue::LinePath { line: id });
         }
-        let Some((stops, path)) = edited_stops(&self.w.net, stops, true) else { return self.refuse(Issue::LinePath { line: id }) };
+        let Some((stops, path)) = edited_stops(&self.w.net, stops, true, &d.ones) else { return self.refuse(Issue::LinePath { line: id }) };
         d.stops = stops;
         d.path = path;
         d.hand = true;
+        if !settle_ones(&self.w.net, &mut d) {
+            return self.refuse(Issue::LinePath { line: id });
+        }
         self.run(Op::Line { id, data: Some(d) })
     }
     /// T-2895: back to the game's own order. An open line's stops, each station once, go in again
@@ -53,19 +69,25 @@ impl TrackApi {
             }
             let mut memo = HopMemo::new();
             // T-3565: one-way stations go where the track puts them, whatever the cost
-            if let Some((stops, path)) = super::legs::sorted(net, &once, &mut memo) {
+            if let Some((stops, path)) = super::legs::sorted(net, &once, &mut memo, &d.ones) {
                 (d.stops, d.path) = (stops, path);
+                if !settle_ones(&self.w.net, &mut d) {
+                    return self.refuse(Issue::LinePath { line: id });
+                }
                 return self.run(Op::Line { id, data: Some(d) });
             }
             let mut best = Some((vec![], vec![]));
             for &s in &once {
-                best = best.and_then(|b| best_slot(net, &b.0, s, &mut memo));
+                best = best.and_then(|b| best_slot(net, &b.0, s, &mut memo, &d.ones));
             }
             let repeats = once.len() < d.stops.len();
             if let Some((stops, path)) = best.filter(|b| repeats || order_cost(net, &b.1) < order_cost(net, &d.path) - 0.001) {
                 d.stops = stops;
                 d.path = path;
             }
+        }
+        if !settle_ones(&self.w.net, &mut d) {
+            return self.refuse(Issue::LinePath { line: id });
         }
         self.run(Op::Line { id, data: Some(d) })
     }
@@ -83,7 +105,7 @@ impl TrackApi {
         if stops.iter().any(|&s| !net.node_ok(s) || net.node_platform[s as usize] == 0) {
             return vec![];
         }
-        match net.route_hops(&stops) {
+        match net.route_hops(&stops, &[]) {
             Ok(_) => vec![],
             Err(k) => vec![if net.joined(stops[k], stops[k + 1]) { 1.0 } else { 0.0 }, stops[k] as f64, stops[k + 1] as f64],
         }
@@ -110,11 +132,14 @@ impl TrackApi {
         let Some(mut d) = self.w.net.line_data(id) else { return self.refuse(Issue::NoSuchLine { line: id }) };
         let Some(stops) = stopped_at(&self.w.net, &d, station) else { return self.refuse(Issue::LinePath { line: id }) };
         // T-3565: a one-way station goes where the track puts it
-        if let Some((s, p)) = (!d.hand).then(|| super::legs::ordered(&self.w.net, &stops, &mut HopMemo::new())).flatten() {
+        if let Some((s, p)) = (!d.hand).then(|| super::legs::ordered(&self.w.net, &stops, &mut HopMemo::new(), &d.ones)).flatten() {
             d.path = p;
             d.stops = s;
         } else {
             d.stops = stops;
+        }
+        if !settle_ones(&self.w.net, &mut d) {
+            return self.refuse(Issue::LinePath { line: id });
         }
         self.run(Op::Line { id, data: Some(d) })
     }
@@ -124,6 +149,9 @@ impl TrackApi {
         let Some((stops, path)) = dropped(&self.w.net, &d, lo, hi) else { return self.refuse(Issue::LinePath { line: id }) };
         d.stops = stops;
         d.path = path;
+        if !settle_ones(&self.w.net, &mut d) {
+            return self.refuse(Issue::LinePath { line: id });
+        }
         self.run(Op::Line { id, data: Some(d) })
     }
     /// Rename or recolour a line; its path stays.
@@ -283,9 +311,56 @@ impl TrackApi {
             self.money_short = None;
             return 2;
         };
-        let Some((stops, path)) = edited_stops(&self.w.net, &stops, d.hand) else { return self.refuse(Issue::LinePath { line: id }) };
+        let Some((stops, path)) = edited_stops(&self.w.net, &stops, d.hand, &d.ones) else { return self.refuse(Issue::LinePath { line: id }) };
         (d.stops, d.path) = (stops, path);
+        if !settle_ones(&self.w.net, &mut d) {
+            return self.refuse(Issue::LinePath { line: id });
+        }
         self.run(Op::Line { id, data: Some(d) })
+    }
+    /// T-3711, the line tool's shift-click: `station` made a stop served one way only, the way that
+    /// makes sense (`settle_ones`: the way the line goes there unless the other turns back less), put
+    /// in where `add_stop` puts it if it is no stop yet; the other run passes it, or keeps to its own
+    /// track. On such a stop already, it is
+    /// served both ways again. A one-way station, or one with its platform on one track, is one way
+    /// already: it goes in as `add_stop` puts it. 2 when there is nowhere to put it.
+    pub fn one_way_stop(&mut self, id: u32, station: u32) -> u32 {
+        let Some(mut d) = self.w.net.line_data(id) else { return self.refuse(Issue::NoSuchLine { line: id }) };
+        let net = &self.w.net;
+        if d.bus.is_some() || d.ferry.is_some() || !net.is_station(station) {
+            return self.refuse(Issue::LinePath { line: id });
+        }
+        if !net.can_one_stop(station) {
+            return if d.stops.contains(&station) { 0 } else { self.add_stop(id, station) };
+        }
+        if d.stops.contains(&station) {
+            if let Some(k) = d.ones.iter().position(|x| x.0 == station) {
+                d.ones.remove(k);
+            } else {
+                d.ones.push((station, 2));
+            }
+        } else {
+            let Some((stops, _)) = best_insert(net, id, station, &mut HopMemo::new()) else {
+                self.issues.clear();
+                self.money_short = None;
+                return 2;
+            };
+            let Some((stops, path)) = edited_stops(net, &stops, d.hand, &d.ones) else { return self.refuse(Issue::LinePath { line: id }) };
+            (d.stops, d.path) = (stops, path);
+            d.ones.retain(|x| x.0 != station);
+            d.ones.push((station, 2));
+        }
+        // the way it is served comes from the route with it a plain stop; then the route with it one way
+        let Some((stops, path)) = edited_stops(net, &d.stops, d.hand, &d.ones) else { return self.refuse(Issue::LinePath { line: id }) };
+        (d.stops, d.path) = (stops, path);
+        if !settle_ones(net, &mut d) {
+            return self.refuse(Issue::LinePath { line: id });
+        }
+        self.run(Op::Line { id, data: Some(d) })
+    }
+    /// T-3711: the stations of a line's one-way stops the player set.
+    pub fn line_one_stops(&self, id: u32) -> Vec<u32> {
+        self.w.net.line_ones(id).iter().map(|x| x.0).collect()
     }
 
     /// The stations a line passes without stopping (T-646): `[gap, node]` pairs in path order, gap
@@ -397,7 +472,7 @@ impl TrackApi {
             return self.refuse(Issue::LinePath { line: id });
         }
         let open = d.stops[..=open_prefix(&d.stops)].to_vec();
-        let Some((stops, path)) = edited_stops(&self.w.net, &open, d.hand) else { return self.refuse(Issue::LinePath { line: id }) };
+        let Some((stops, path)) = edited_stops(&self.w.net, &open, d.hand, &[]) else { return self.refuse(Issue::LinePath { line: id }) };
         d.stops = stops;
         d.path = path;
         self.run(Op::Line { id, data: Some(d) })
@@ -427,6 +502,22 @@ impl TrackApi {
         d.limit = if kmh == 0 { 0 } else { kmh.clamp(LINE_LIMIT_MIN, top) as u16 };
         self.run(Op::Line { id, data: Some(d) })
     }
+    /// T-3758: whether a line (any kind) pays the distance fare where the game has fare zones.
+    pub fn line_fare_dist(&self, line: u32) -> bool {
+        self.w.net.line_ok(line) && self.w.net.line_fare_dist[line as usize]
+    }
+    /// T-3758: set a line (rail, bus or ferry) to pay the distance fare (`dist`) or zone fares, one
+    /// undoable edit, free; 1 when it already does (no edit). A copy keeps it (`copy_line`).
+    pub fn set_line_fare_dist(&mut self, id: u32, dist: bool) -> u32 {
+        let Some(mut d) = self.w.net.line_data(id) else { return self.refuse(Issue::NoSuchLine { line: id }) };
+        if d.fare_dist == dist {
+            self.money_short = None;
+            self.issues.clear();
+            return 1;
+        }
+        d.fare_dist = dist;
+        self.run(Op::Line { id, data: Some(d) })
+    }
 
     /// The stops where a line's trains reverse partway, as indices into its stops (T-797).
     pub fn line_reversals(&self, line: u32) -> Vec<f64> {
@@ -453,7 +544,10 @@ impl TrackApi {
             let mut legs: Vec<u32> = ls.runs.iter().flat_map(|r| r.away.iter().map(|x| x.1)).collect();
             legs.sort_unstable();
             legs.dedup();
-            let legs: Vec<f64> = legs.into_iter().filter_map(|n| net.leg_heading(n).map(|th| [n as f64, th])).flatten().collect();
+            // T-3711: a one-way stop the player set, the way trains arriving by its side run
+            let ones = net.line_ones(line);
+            let forced = |n: u32| net.one_stop_side(ones, n).map(|w| net.node_heading[n as usize] + if w == 0 { 0.0 } else { PI });
+            let legs: Vec<f64> = legs.into_iter().filter_map(|n| net.leg_heading(n).or_else(|| forced(n)).map(|th| [n as f64, th])).flatten().collect();
             if ls.is_bus() || !ls.stops.iter().any(|&n| net.one_side(n).is_some()) {
                 return legs;
             }
@@ -536,7 +630,17 @@ impl TrackApi {
         let Some(d) = self.w.net.line_data(id) else { return self.refuse(Issue::NoSuchLine { line: id }) };
         let [high, medium, low] = if pairs_split(&self.w.net, id) { counts.map(|x| x.div_ceil(2)) } else { counts };
         let op = if d.auto.is_some() { Op::AutoTrains { id, auto: None, trains: Some([high, medium, low]) } } else { Op::TrainCounts { id, trains: Some([high, medium, low]), tph: d.tph } };
+        let op = self.high_rows(id, op, |x| x.trains = [high; 2]);
         if recorded { self.run(op) } else { self.run_unrecorded(op) }
+    }
+    /// T-3542: an edit of three rows (high, medium, low) on a line of four or five rows sets all
+    /// its high periods' rows (`set`: midday's and afternoon's from high's) with it.
+    fn high_rows(&self, id: u32, op: Op, set: impl FnOnce(&mut Extra)) -> Op {
+        let net = &self.w.net;
+        if !net.line_ok(id) || net.rows(id as usize) == ROWS_MIN { return op; }
+        let mut x = net.line_x[id as usize];
+        set(&mut x);
+        if x == net.line_x[id as usize] { op } else { Op::Batch(vec![op, Op::Extra { id, x }]) }
     }
 
     /// T-3521: a line's weekends: its percent, 1 where its counts are set by hand (else 0), then its
@@ -551,18 +655,18 @@ impl TrackApi {
         let h = if w.counts.is_some() { w.headways.map(|h| h / k) } else { [0; 3] };
         vec![w.share as f64, w.counts.is_some() as u8 as f64, (c[0] * k) as f64, (c[1] * k) as f64, (c[2] * k) as f64, h[0] as f64, h[1] as f64, h[2] as f64]
     }
-    /// T-3521: a line's trains an hour at level `lev` on kind of day `row` (0 weekdays, 1 weekends;
-    /// `Network::line_tph_on`).
+    /// T-3521: a line's trains an hour at level `lev` (a row: high, medium, low) on kind of day
+    /// `row` (0 weekdays, 1 weekends; `Network::line_tph_on`).
     pub fn line_tph_on(&self, id: u32, row: u32, lev: u32) -> f32 {
-        if id as usize >= self.w.net.line_count() || lev as usize >= LEVELS { return 0.0 }
-        self.w.net.line_tph_on(id as usize, (row as usize).min(DAY_ROWS - 1), lev as usize)
+        if id as usize >= self.w.net.line_count() || lev as usize >= ROWS { return 0.0 }
+        self.w.net.line_tph_on(id as usize, (row as usize).min(DAY_ROWS - 1), self.w.net.row_slot(id as usize, lev as usize))
     }
     /// T-3521: a line's trains an hour on weekends, high, medium, low (`line_tph_on`), with its hidden
     /// twin's for a line on both pairs, as its panel shows the weekdays' (T-3333).
     pub fn line_tph_rest(&self, id: u32) -> Vec<f32> {
         let net = &self.w.net;
         let twin = net.twin_line(id);
-        (0..LEVELS).map(|lev| net.line_tph_on(id as usize, WEEKEND, lev) + twin.map_or(0.0, |t| net.line_tph_on(t as usize, WEEKEND, lev))).collect()
+        (0..ROWS).map(|row| net.line_tph_on(id as usize, WEEKEND, net.row_slot(id as usize, row)) + twin.map_or(0.0, |t| net.line_tph_on(t as usize, WEEKEND, net.row_slot(t as usize, row)))).collect()
     }
     /// T-3521: run a line's weekends at `share` percent of its weekdays (10 to 200), its counts set by
     /// hand dropped. One undoable edit, charged for the trains it makes the line need (`cars_needed`).
@@ -583,7 +687,8 @@ impl TrackApi {
         let headways = std::array::from_fn(|i| if c[i] == now[i] { was.headways[i] } else { 0 });
         let weekend = Weekend { counts: Some(c), headways, ..was };
         if was == weekend { return 0; }
-        self.run(Op::Weekend { id, weekend })
+        let op = self.high_rows(id, Op::Weekend { id, weekend }, |x| x.weekend_counts = [c[0]; 2]);
+        self.run(op)
     }
     /// T-3557: set a headway line's weekend trains by hand as `set_line_weekend_counts`, and the
     /// headways in seconds they run (0 = a level run by count): the weekends then run that headway,
@@ -601,7 +706,8 @@ impl TrackApi {
         let was = self.w.net.line_weekend[id as usize];
         let weekend = Weekend { counts: Some(c), headways, ..was };
         if was == weekend { return 0; }
-        self.run(Op::Weekend { id, weekend })
+        let op = self.high_rows(id, Op::Weekend { id, weekend }, |x| (x.weekend_counts, x.weekend_headways) = ([c[0]; 2], [headways[0]; 2]));
+        self.run(op)
     }
     /// T-3521: run every line's weekends at `share` percent of its weekdays, counts set by hand
     /// dropped (`set_line_weekend_share`), as one undoable edit. A hidden twin follows its line.
@@ -625,19 +731,237 @@ impl TrackApi {
         if !self.w.net.line_ok(id) { return self.refuse(Issue::NoSuchLine { line: id }) }
         let auto = if pairs_split(&self.w.net, id) { [high, medium, low].map(|h| h * 2) } else { [high, medium, low] };
         let svc = self.w.svc.lines.get(id as usize);
-        let trip = svc.map_or([0.0; 3], |s| s.round_trip);
+        let trip = svc.map_or([0.0; ROWS], |s| slots_to_rows(s.round_trip));
         let trains = match (self.w.net.line_auto[id as usize], self.w.net.line_trains[id as usize]) {
             (None, Some(t)) => t,
-            (None, None) => svc.map_or([0; 3], |s| s.trains),
+            (None, None) => svc.map_or([0; ROWS], |s| slots_to_rows(s.trains)),
             _ => std::array::from_fn(|lev| auto_trains(trip[lev], auto[lev])),
         };
-        self.run(Op::AutoTrains { id, auto: Some(auto), trains: Some(trains) })
+        let op = self.high_rows(id, Op::AutoTrains { id, auto: Some(auto), trains: Some(trains) }, |x| (x.auto, x.trains) = ([auto[0]; 2], [trains[0]; 2]));
+        self.run(op)
     }
 
     /// T-625: back to counts set by hand, as they stand.
     pub fn clear_auto_headway(&mut self, id: u32) -> u32 {
         let Some(d) = self.w.net.line_data(id) else { return self.refuse(Issue::NoSuchLine { line: id }) };
         self.run(Op::AutoTrains { id, auto: None, trains: d.trains })
+    }
+
+    /// T-3542: the rows (3, 4 or 5) a line following the game's sets its trains in.
+    pub fn game_periods(&self) -> u32 {
+        self.w.net.rows_default as u32
+    }
+    /// T-3542: the rows line `id` sets its trains in (3, 4 or 5), 0 for no line.
+    pub fn line_period_count(&self, id: u32) -> u32 {
+        if self.w.net.line_ok(id) { self.w.net.rows(id as usize) as u32 } else { 0 }
+    }
+    /// T-3542: line `id`'s own rows, 0 where it follows the game's.
+    pub fn line_periods_own(&self, id: u32) -> u32 {
+        if self.w.net.line_ok(id) { self.w.net.line_rows[id as usize] as u32 } else { 0 }
+    }
+    /// T-3542: the slot serving each period (`Network::period_slot`), five numbers.
+    pub fn period_slots(&self) -> Vec<u32> {
+        self.w.net.period_slot().iter().map(|&s| s as u32).collect()
+    }
+    /// T-3542: set the rows (3 to 5) the lines following the game's set their trains in, as one
+    /// undoable edit; rows joined take the most trains of them (`TrackWorld::rows_ops`).
+    pub fn set_game_periods(&mut self, rows: u32) -> u32 {
+        if !(ROWS_MIN..=ROWS_MAX).contains(&(rows as usize)) { return self.refuse(Issue::LineSchedule { line: u32::MAX }) }
+        match self.w.rows_ops(None, rows as u8) { Some(op) => self.run(op), None => 0 }
+    }
+    /// T-3542: set line `id`'s own rows (3 to 5; 0 to follow the game's) as `set_game_periods`.
+    pub fn set_line_periods(&mut self, id: u32, rows: u32) -> u32 {
+        let net = &self.w.net;
+        if !net.line_ok(id) || net.is_twin(id) { return self.refuse(Issue::NoSuchLine { line: id }) }
+        if rows != 0 && !(ROWS_MIN..=ROWS_MAX).contains(&(rows as usize)) { return self.refuse(Issue::LineSchedule { line: id }) }
+        match self.w.rows_ops(Some(id), rows as u8) { Some(op) => self.run(op), None => 0 }
+    }
+    /// T-3542: line `id`'s whole trains per row in the day's order (`line_period_count` of them; rush or
+    /// morning first), whole-line counts as `set_train_counts` takes them. Empty for none.
+    pub fn line_row_trains(&self, id: u32) -> Vec<u32> {
+        let net = &self.w.net;
+        let Some(t) = net.line_ok(id).then(|| net.trains_of(id as usize)).flatten() else { return vec![] };
+        let k = if pairs_split(net, id) { 2 } else { 1 };
+        ROW_PLACES[net.rows(id as usize) - ROWS_MIN].iter().map(|&p| t[p] * k).collect()
+    }
+    /// T-3542: line `id`'s headways in seconds per row as `line_row_trains`, empty for a line set by
+    /// count.
+    pub fn line_row_headways(&self, id: u32) -> Vec<u32> {
+        let net = &self.w.net;
+        let Some(a) = net.line_ok(id).then(|| net.auto_of(id as usize)).flatten() else { return vec![] };
+        let k = if pairs_split(net, id) { 2 } else { 1 };
+        ROW_PLACES[net.rows(id as usize) - ROWS_MIN].iter().map(|&p| a[p] / k).collect()
+    }
+    /// T-3542: set line `id`'s whole trains per row (`line_row_trains`'s order and count), as
+    /// `set_train_counts` does for three rows: one undoable edit.
+    pub fn set_line_row_trains(&mut self, id: u32, trains: Vec<u32>) -> u32 {
+        let Some(d) = self.w.net.line_data(id) else { return self.refuse(Issue::NoSuchLine { line: id }) };
+        let (net, l) = (&self.w.net, id as usize);
+        let rows = ROW_PLACES[net.rows(l) - ROWS_MIN];
+        if trains.len() != rows.len() { return self.refuse(Issue::LineSchedule { line: id }) }
+        let split = pairs_split(net, id);
+        let mut p = net.trains_of(l).unwrap_or([0; 5]);
+        for (&k, &n) in rows.iter().zip(&trains) { p[k] = if split { n.div_ceil(2) } else { n }; }
+        let (m, x) = unplace(p);
+        let main = if d.auto.is_some() { Op::AutoTrains { id, auto: None, trains: Some(m) } } else { Op::TrainCounts { id, trains: Some(m), tph: d.tph } };
+        self.run(Op::Batch(vec![main, Op::Extra { id, x: Extra { trains: x, ..d.x } }]))
+    }
+    /// T-3542: line `id`'s trains follow a headway in seconds per row (`line_row_trains`'s order and
+    /// count; 0 no service), as `set_auto_headway` does for three rows.
+    pub fn set_line_row_headways(&mut self, id: u32, headways: Vec<u32>) -> u32 {
+        let Some(d) = self.w.net.line_data(id) else { return self.refuse(Issue::NoSuchLine { line: id }) };
+        let (net, l) = (&self.w.net, id as usize);
+        let rows = ROW_PLACES[net.rows(l) - ROWS_MIN];
+        if headways.len() != rows.len() { return self.refuse(Issue::LineSchedule { line: id }) }
+        let split = pairs_split(net, id);
+        let mut a = net.auto_of(l).unwrap_or([0; 5]);
+        for (&k, &h) in rows.iter().zip(&headways) { a[k] = if split { h * 2 } else { h }; }
+        // the trains it starts from: those it has (a switch to headways keeps them, T-752), or a
+        // headway line's for the new headways over its round trip
+        let trains = match (net.auto_of(l), net.trains_of(l)) {
+            (None, Some(t)) => t,
+            (None, None) => self.w.svc.lines.get(l).map_or([0; 5], |s| net.places_most(l, s.trains)),
+            _ => {
+                let trip = self.w.svc.lines.get(l).map_or([0.0; 5], |s| net.places_most(l, s.round_trip));
+                std::array::from_fn(|k| auto_trains(trip[k], a[k]))
+            }
+        };
+        let ((am, ax), (tm, tx)) = (unplace(a), unplace(trains));
+        self.run(Op::Batch(vec![Op::AutoTrains { id, auto: Some(am), trains: Some(tm) }, Op::Extra { id, x: Extra { auto: ax, trains: tx, ..d.x } }]))
+    }
+    /// T-3542: line `id`'s settled trains an hour in each of the five periods (its slot's), on
+    /// weekdays.
+    pub fn line_tph_by_period(&self, id: u32) -> Vec<f32> {
+        let net = &self.w.net;
+        let Some(t) = net.line_tph.get(id as usize).filter(|_| net.line_ok(id)) else { return vec![] };
+        net.period_slot().iter().map(|&s| t[s]).collect()
+    }
+
+    /// T-3542: line `id`'s trains an hour in each of the five periods as demand reads them
+    /// (`Service::demand_tph`: in a period its hours share between rows, the rate of the mean
+    /// headway its riders meet), weekdays.
+    pub fn line_demand_tph(&self, id: u32) -> Vec<f32> {
+        if !self.w.net.line_ok(id) { return vec![] }
+        self.w.svc.demand_tph(&self.w.net, id as usize).to_vec()
+    }
+    /// T-3542: the hours the lines following the game's split their day at (`params::Cuts`: where
+    /// the morning, midday, afternoon, evening and night start, local whole hours, the later ones
+    /// past 24 where they reach past midnight).
+    pub fn game_hours(&self) -> Vec<u32> {
+        self.w.net.hours_default.iter().map(|&c| c as u32).collect()
+    }
+    /// T-3542: the hours line `id` splits its day at (its own, else the game's), empty for no line.
+    pub fn line_hours(&self, id: u32) -> Vec<u32> {
+        if !self.w.net.line_ok(id) { return vec![] }
+        self.w.net.hours(id as usize).iter().map(|&c| c as u32).collect()
+    }
+    /// T-3542: line `id`'s own hours, empty where it follows the game's.
+    pub fn line_hours_own(&self, id: u32) -> Vec<u32> {
+        let net = &self.w.net;
+        match net.line_x.get(id as usize).filter(|_| net.line_ok(id) && net.line_rows[id as usize] != 0).map(|x| x.hours) {
+            Some(c) if c != [0; 5] => c.iter().map(|&c| c as u32).collect(),
+            _ => vec![],
+        }
+    }
+    /// T-3542: set the game's hours (five, as `game_hours`), one undoable edit. Refused unless
+    /// every stretch is at least two hours (`params::cuts_ok`).
+    pub fn set_game_hours(&mut self, cuts: Vec<u32>) -> u32 {
+        match cuts_of(&cuts) {
+            Some(c) if cuts_ok(c) => if c == self.w.net.hours_default { 0 } else { self.run(Op::Hours { line: None, cuts: c }) },
+            _ => self.refuse(Issue::LineSchedule { line: u32::MAX }),
+        }
+    }
+    /// T-3542: set line `id`'s own hours as `set_game_hours` (empty: the game's).
+    pub fn set_line_hours(&mut self, id: u32, cuts: Vec<u32>) -> u32 {
+        let net = &self.w.net;
+        if !net.line_ok(id) || net.is_twin(id) { return self.refuse(Issue::NoSuchLine { line: id }) }
+        let c = if cuts.is_empty() { Some([0; 5]) } else { cuts_of(&cuts).filter(|&c| cuts_ok(c)) };
+        match c {
+            Some(c) => if c == net.line_x[id as usize].hours { 0 } else { self.run(Op::Hours { line: Some(id), cuts: c }) },
+            _ => self.refuse(Issue::LineSchedule { line: id }),
+        }
+    }
+    /// T-3542: line `id`'s trains an hour in demand period `period` (0-4) on kind of day `row` (0
+    /// weekdays, 1 weekends), its slot's (`line_tph_on`).
+    pub fn line_tph_period_on(&self, id: u32, row: u32, period: u32) -> f32 {
+        if id as usize >= self.w.net.line_count() { return 0.0 }
+        self.w.net.line_tph_on(id as usize, (row as usize).min(DAY_ROWS - 1), self.w.net.period_slot()[(period as usize).min(4)])
+    }
+    /// T-3542: line `id`'s figures per row in the day's order (`line_period_count` rows), `ROW_FIGS`
+    /// numbers each: round trip s, trains the service runs, capacity delay over the round trip s,
+    /// trains an hour on weekdays, and on weekends with its hidden twin's (as `line_tph_rest`). A row
+    /// over several slots (rush; a row of three in a game of five) shows the longest round trip, the
+    /// most trains and delay, and the fewest trains an hour (its longest headway) of them. Empty for
+    /// no line.
+    pub fn line_rows(&self, id: u32) -> Vec<f64> {
+        let (net, l) = (&self.w.net, id as usize);
+        if !net.line_ok(id) { return vec![] }
+        let svc = self.w.svc.lines.get(l).filter(|s| s.ok);
+        let twin = net.twin_line(id);
+        let placed = net.trains_of(l).unwrap_or([0; 5]);
+        let mut out = vec![];
+        for (k, slots) in net.row_slots(l) {
+            let most = |f: &dyn Fn(usize) -> f64| slots.iter().map(|&s| f(s)).fold(f64::NEG_INFINITY, f64::max).max(0.0);
+            let least = |f: &dyn Fn(usize) -> f64| slots.iter().map(|&s| f(s)).fold(f64::INFINITY, f64::min);
+            match svc {
+                // (a slot its hours share with another row: its own trains, not the slot's fleet)
+                Some(s) => out.extend([most(&|x| s.round_trip[x]), most(&|x| if net.mixed(l, x).is_some() { placed[k] as f64 } else { s.trains[x] as f64 }), most(&|x| s.delay[x])]),
+                None => out.extend([0.0, placed[k] as f64, 0.0]),
+            }
+            // T-3542: in a slot its hours share between rows, the row's own rate there
+            let trip = |x: usize| svc.map_or(0.0, |s| s.round_trip[x]);
+            let tph = least(&|x| net.place_tph(l, x, k, net.line_tph[l][x], trip(x)) as f64);
+            let rest = least(&|x| (net.place_tph(l, x, k, net.line_tph_on(l, WEEKEND, x), trip(x)) + twin.map_or(0.0, |t| net.place_tph(t as usize, x, k, net.line_tph_on(t as usize, WEEKEND, x), trip(x)))) as f64);
+            out.extend([if tph.is_finite() { tph } else { 0.0 }, if rest.is_finite() { rest } else { 0.0 }]);
+        }
+        out
+    }
+    /// T-3542: line `id`'s weekends per row as `line_weekend` gives them for three: its percent, 1
+    /// where its counts are set by hand, then its whole trains per row on weekends (whole-line counts)
+    /// and the headways stepped to per row (seconds, 0 none), rows in the day's order.
+    pub fn line_row_weekend(&self, id: u32) -> Vec<f64> {
+        let (net, l) = (&self.w.net, id as usize);
+        if !net.line_ok(id) { return vec![] }
+        let (Some(w), Some(t)) = (net.line_weekend.get(l).copied(), net.trains_of(l)) else { return vec![] };
+        let k = if pairs_split(net, id) { 2 } else { 1 };
+        let c = self.w.weekend_places(l).unwrap_or(t);
+        let h = if w.counts.is_some() { places(w.headways, net.line_x[l].weekend_headways).map(|h| h / k) } else { [0; 5] };
+        let rows = ROW_PLACES[net.rows(l) - ROWS_MIN];
+        let mut out = vec![w.share as f64, w.counts.is_some() as u8 as f64];
+        out.extend(rows.iter().map(|&p| (c[p] * k) as f64));
+        out.extend(rows.iter().map(|&p| h[p] as f64));
+        out
+    }
+    /// T-3542: set line `id`'s whole trains on weekends per row by hand (`line_period_count` of them,
+    /// the day's order), as `set_line_weekend_counts` does for three rows; `headways` per row in
+    /// seconds (0 = a row run by count), as `set_line_weekend_headways`, or empty to keep only the
+    /// headways of rows whose count did not change. One undoable edit.
+    pub fn set_line_row_weekend(&mut self, id: u32, counts: Vec<u32>, headways: Vec<u32>) -> u32 {
+        let Some(d) = self.w.net.line_data(id) else { return self.refuse(Issue::NoSuchLine { line: id }) };
+        let (net, l) = (&self.w.net, id as usize);
+        let rows = ROW_PLACES[net.rows(l) - ROWS_MIN];
+        if counts.len() != rows.len() || !(headways.is_empty() || headways.len() == rows.len()) { return self.refuse(Issue::LineSchedule { line: id }) }
+        let split = pairs_split(net, id);
+        let now = self.w.weekend_places(l).or(net.trains_of(l)).unwrap_or([0; 5]);
+        let was_h = places(d.weekend.headways, d.x.weekend_headways);
+        let (mut c, mut h) = (now, if d.weekend.counts.is_some() { was_h } else { [0; 5] });
+        let cur = self.w.weekend_auto(l);
+        for (i, &p) in rows.iter().enumerate() {
+            c[p] = if split { counts[i].div_ceil(2) } else { counts[i] };
+            if headways.is_empty() {
+                // a headway stepped to stays only at a row whose count did not change
+                if c[p] != now[p] { h[p] = 0; }
+            } else {
+                h[p] = if split { headways[i] * 2 } else { headways[i] };
+                // a row not stepped keeps the headway the weekends ran there (`set_line_weekend_headways`)
+                if h[p] == 0 && c[p] > 0 { if let Some(a) = cur { h[p] = a[p]; } }
+            }
+        }
+        let ((cm, cx), (hm, hx)) = (unplace(c), unplace(h));
+        let weekend = Weekend { counts: Some(cm), headways: hm, ..d.weekend };
+        let x = Extra { weekend_counts: cx, weekend_headways: hx, ..d.x };
+        if weekend == d.weekend && x == d.x { return 0; }
+        self.run(Op::Batch(vec![Op::Weekend { id, weekend }, Op::Extra { id, x }]))
     }
 
     /// The line's headways in seconds per level when its counts follow them, else empty (T-625).
@@ -707,17 +1031,17 @@ fn distinct_stops(stops: &[u32]) -> Vec<u32> {
 /// turns back takes a straighter order of the same stops where one exists (T-1899, `straighten`),
 /// unless the player set its order by hand (`hand`, T-2895). A loop stops at every pass of a station
 /// it stops at (T-3122, `every_pass`).
-fn edited_stops(net: &Network, stops: &[u32], hand: bool) -> Option<(Vec<u32>, Vec<u32>)> {
+fn edited_stops(net: &Network, stops: &[u32], hand: bool, ones: &[(u32, u8)]) -> Option<(Vec<u32>, Vec<u32>)> {
     let stops = distinct_stops(stops);
     // T-3565: one-way stations where the track puts them
     if !hand {
-        if let Some(r) = super::legs::ordered(net, &stops, &mut HopMemo::new()) {
+        if let Some(r) = super::legs::ordered(net, &stops, &mut HopMemo::new(), ones) {
             return Some(r);
         }
     }
-    let path = net.route(&stops)?;
+    let path = net.route(&stops, ones)?;
     if !closed(&stops) {
-        return Some(if hand { (stops, path) } else { straighten(net, &stops, &path).unwrap_or((stops, path)) });
+        return Some(if hand { (stops, path) } else { straighten(net, &stops, &path, ones).unwrap_or((stops, path)) });
     }
     let n = path.len();
     if n == 0 || (0..n).any(|i| path[i] != path[n - 1 - i] ^ 1) {
@@ -727,8 +1051,53 @@ fn edited_stops(net: &Network, stops: &[u32], hand: bool) -> Option<(Vec<u32>, V
     let at = super::super::net::match_stops(&nodes, &stops, &net.stop_reversals(&path))?;
     let kept: Vec<u32> = stops.iter().zip(&at).filter(|x| *x.1 <= n / 2).map(|x| *x.0).collect();
     let kept = distinct_stops(&kept);
-    let path = net.route(&kept)?;
+    let path = net.route(&kept, &[])?;
     Some((kept, path))
+}
+
+/// T-3711: each one-way stop of `d` the player set (a shift-click) is served the way that makes
+/// sense: of its two ways, the one whose line turns back fewer times (both runs); on a tie the way it
+/// has, or for one just set, the way the line goes there now (run 0 on `d.path`, in the stop list's
+/// order; at the first stop, the way it leaves). So a stop clicked one way before the station on the
+/// other leg goes the other way once that station is a stop. The line is routed with each so; where
+/// it has no route yet a new one waits. Stops no longer on the line drop out. False when neither
+/// way has a route.
+fn settle_ones(net: &Network, d: &mut LineData) -> bool {
+    let stops = d.stops.clone();
+    d.ones.retain(|x| stops.contains(&x.0));
+    for k in 0..d.ones.len() {
+        if d.path.is_empty() || closed(&d.stops) {
+            break;
+        }
+        let (s, w) = d.ones[k];
+        let now = if w < 2 {
+            w
+        } else {
+            let fixed: Vec<(u32, u8)> = d.ones.iter().copied().filter(|x| x.1 < 2).collect();
+            let nodes = path_node_list(net, &d.path);
+            let at = net.match_run(&nodes, &d.stops, &net.stop_reversals(&d.path), &fixed, &d.path).and_then(|m| d.stops.iter().position(|&x| x == s).map(|j| m.0[j]));
+            let p = &d.path;
+            at.and_then(|at| if at > 0 { net.arrive_side(p[at - 1]) } else { net.port_side(p[0] >> 1, p[0] & 1).map(|x| 1 - x) }).unwrap_or(0)
+        };
+        let mut best: Option<(usize, LineData)> = None;
+        for side in [now, 1 - now] {
+            let mut t = d.clone();
+            t.ones[k].1 = side;
+            let Some((st, path)) = edited_stops(net, &t.stops, t.hand, &t.ones) else { continue };
+            let Some((_, back)) = net.back_run_of(&st, &path, &t.ones) else { continue };
+            let score = net.path_reversals(&path).len() + net.path_reversals(&back).len();
+            (t.stops, t.path) = (st, path);
+            if best.as_ref().map_or(true, |b| score < b.0) {
+                best = Some((score, t));
+            }
+        }
+        let Some((_, t)) = best else { return false };
+        // a side kept leaves the stops and path as the edit made them (a drop keeps its path, T-1791)
+        if t.ones[k].1 != w {
+            *d = t;
+        }
+    }
+    true
 }
 
 /// A path's node list, `path.len() + 1` nodes.
@@ -747,21 +1116,25 @@ fn dropped(net: &Network, d: &LineData, lo: usize, hi: usize) -> Option<(Vec<u32
     if closed(&d.stops) && (lo == 0 || hi == n - 1 || n - (hi - lo + 1) < 3) {
         return None;
     }
-    let at = net.match_run(&path_node_list(net, &d.path), &d.stops, &net.stop_reversals(&d.path))?.0;
+    let at = net.match_run(&path_node_list(net, &d.path), &d.stops, &net.stop_reversals(&d.path), &d.ones, &d.path)?.0;
     let stops: Vec<u32> = d.stops[..lo].iter().chain(&d.stops[hi + 1..]).copied().collect();
     if stops.windows(2).any(|w| w[0] == w[1]) {
         return None;
     }
     // T-3565: with one-way stations the path is found again, as they go where the track puts them
     if !d.hand {
-        if let Some(r) = super::legs::ordered(net, &stops, &mut HopMemo::new()) {
+        if let Some(r) = super::legs::ordered(net, &stops, &mut HopMemo::new(), &d.ones) {
             return Some(r);
         }
+    }
+    // T-3711: a one-way stop the player set may be one the forward path only passes: found again
+    if stops.iter().any(|s| d.ones.iter().any(|x| x.0 == *s)) {
+        return edited_stops(net, &stops, d.hand, &d.ones);
     }
     let first = if lo == 0 { hi + 1 } else { 0 };
     let last = if hi == n - 1 { lo - 1 } else { n - 1 };
     let path = d.path[at[first]..at[last]].to_vec();
-    net.match_run(&path_node_list(net, &path), &stops, &net.stop_reversals(&path))?;
+    net.match_run(&path_node_list(net, &path), &stops, &net.stop_reversals(&path), &d.ones, &path)?;
     Some((stops, path))
 }
 
@@ -773,7 +1146,7 @@ fn stopped_at(net: &Network, d: &LineData, station: u32) -> Option<Vec<u32>> {
     }
     let nodes = path_node_list(net, &d.path);
     let must = net.stop_reversals(&d.path);
-    let at = net.match_run(&nodes, &d.stops, &must)?.0;
+    let at = net.match_run(&nodes, &d.stops, &must, &d.ones, &d.path)?.0;
     nodes.iter().enumerate().filter(|x| *x.1 == station).find_map(|(k, _)| {
         let pos = at.iter().filter(|&&a| a < k).count();
         let mut stops = d.stops.clone();
@@ -781,7 +1154,7 @@ fn stopped_at(net: &Network, d: &LineData, station: u32) -> Option<Vec<u32>> {
             return None;
         }
         stops.insert(pos, station);
-        net.match_run(&nodes, &stops, &must).map(|_| stops)
+        net.match_run(&nodes, &stops, &must, &d.ones, &d.path).map(|_| stops)
     })
 }
 

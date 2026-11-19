@@ -25,6 +25,8 @@
 // (`lineAt`, `stopAt`), on pointer moves only.
 
 import { t } from "../i18n";
+import { render } from "preact";
+import { Icon } from "../ui/widgets";
 import { speedColour, profitColour, rgb, rgbf, LEVEL_COLOURS } from "../game/palette";
 import type { ShadeColours } from "../game/shadeTable";
 import type { WorldView } from "../game/types";
@@ -39,6 +41,7 @@ import { factRow, headingChevron, lineBullet } from "./trackTagRows";
 import type { TipLine } from "./networkTips";
 import { ARROW_SPREAD, ARROW_ZOOM, ONE_WAY_STEP_M, oneWayEvery } from "./oneWayMarks";
 import { busStopLinks } from "../game/busLinks";
+import { ROW_SLOT, profileOf } from "./profiles";
 
 /** Street stops are drawn from this zoom, ends from `END_ZOOM` (T-2950). */
 export const BUS_RING_ZOOM = 13;
@@ -1037,7 +1040,7 @@ function runSpeed(l: BusSource, k: number, f: number, phases: Float32Array, meta
   if (!S || k < 0 || k > n - 2) return null;
   let best: number | null = null;
   for (const run of [0, 1]) {
-    const m = ((l.id * 2 + run) * 3 + SPEED_LEVEL) * 4;
+    const m = profileOf(l.id, run, ROW_SLOT[SPEED_LEVEL]) * 4;
     const first = meta[m], count = meta[m + 1];
     if (!(count > 0)) continue;
     // run 1 runs the stops backwards: its stretch n - 2 - k is run 0's k
@@ -1067,13 +1070,23 @@ function nameRow(w: WorldView, line: number, deg: number | null = null): HTMLEle
   return factRow(held, name);
 }
 
-/** The tag for a bus line (hovering its route): as a rail line's, its name, that it is a bus, and
+/** The dock's bus or ferry icon at the tag's icon size, ending a line's name row. */
+function vehicleIcon(kind: "bus" | "ferry"): HTMLSpanElement {
+  const s = document.createElement("span");
+  s.className = "tag-vehicle";
+  s.setAttribute("aria-label", t(kind === "ferry" ? "busLayer.ferryLine" : "busLayer.busLine"));
+  render(Icon[kind](), s);
+  return s;
+}
+
+/** The tag for a bus line (hovering its route): as a rail line's, its name and its vehicle's icon, and
  * `rows` (its riders there) once it runs. */
 export function busLineTip(w: WorldView, line: number, rows: TipLine[] = []): TipLine[] {
   const l = w.save.lines.find((x) => x.num === line);
   const b = l ? w.lineStats[l.id]?.bus : undefined, built = b ? b.built : true;
-  const kind = b?.ferry ? t("busLayer.ferryLine") : t("busLayer.busLine");
-  return built ? [nameRow(w, line), kind, ...rows] : [nameRow(w, line), kind, t("busLayer.notRunning")];
+  const name = nameRow(w, line);
+  if (typeof name !== "string") name.append(vehicleIcon(b?.ferry ? "ferry" : "bus"));
+  return built ? [name, ...rows] : [name, t("busLayer.notRunning")];
 }
 
 /** The tag for one of its stops. */

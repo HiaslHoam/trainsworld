@@ -33,6 +33,13 @@ bars); the network takes the line colours ([ui-map.md](ui-map.md)).
   Cities lists'), rows holding a stepper, button or box 28 px [T-1802].
   A rule only separates sections about different things (the line panel's `.h.divided`, the
   inspector's top edge); a list's column headers keep their thin rule over the rows.
+- **Spacing comes from the container** [T-3768]: Settings (and the start menu's settings) is one column with
+  an 8 px gap between rows, a heading 14 px under the row above and 4 px over its first row; a row brings no
+  margin of its own. `checks/t3768-panel-gaps.mjs` fails when two controls or lines of text in the main panels
+  come within 3 px of each other, at 1400 and 390 px, unless they are one control (a Segmented, a stepper), and when
+  one reaches past the panel's side or a label is cut to almost nothing; the one pair it lets through is a 28 px
+  row of buttons right under a stepper row (2 px, from the row heights above). Where a heading's right part or a
+  row's buttons do not fit beside their text, they go under it.
 - **Motion where it helps** (Anita 2026-10-29, dropping the old "no motion but trains" rule): state
   changes stay quick and no control waits on an animation. Camera moves the game makes (search, Go to)
   jump with no flight [T-182]; the map's own gestures keep MapLibre's easing.
@@ -300,7 +307,7 @@ wide so a longer date moves nothing [T-1868].
   slower and faster buttons with the speed between them as text [T-3653]: one step along the slider's 20 stops (`SLIDER_STOPS` in `game/clock.ts`,
   real to 100x, spaced for the eye; "real" is 1 game second per second, 1/60 of 1x, and "4real" is four times that), each button off at its end; the
   comma key slows and the period key speeds up by one step (`clock.stepSpeed`, `main.ts`; listed in Help; held, they keep stepping every 90 ms at most [T-3717]). **Click the speed** for the slider [T-1664, T-3717];
-  the speed stays until changed (not saved with the game). Replaced the 1x, 4x, 16x buttons.
+  the speed stays until changed (not saved with the game). Replaced the 1x, 4x, 16x buttons; Settings > Map "Use legacy time speed controls" (off by default, remembered in the browser, T-3765) brings them back: pause, 1x, 4x and a third button showing the speed as text (a click runs it, a double click opens the slider), with the comma and period keys still stepping.
   **While the player's edits are not yet in the figures** the clock runs no faster than 4x [T-1665,
   `demandCapped` in `game/lineFigures.ts`]: after an edit, until every line it changed has its riders
   again (each reads "calculating..." meanwhile: its cluster's local result, or the
@@ -363,7 +370,8 @@ the button is gone.
 - **Rows, worst first** (12 px type, one row each, the whole row's hover giving the figures):
   lines whose track is gone (its chip, a red alert mark); places where lines reverse partway (an
   amber U-turn disc, the station or "Track end", up to three of the lines' chips); orange and red
-  capacity tags, the map's tags at 90% and up (`NEAR_RHO`) at the demand level in force that are over capacity or
+  capacity tags, the map's tags at 90% and up (`NEAR_RHO`) in the demand period in force (T-3542; the hover's wait names
+  it, "Each train waits 1m20s here in the morning peak") that are over capacity or
   make trains wait 2 s or more (a line alone queues only once over capacity, so a 99% tag with no wait is no problem) [T-2945], one row per
   kind by one station with the worst delay, red ones first ("Flat crossing near 14 St/6 Av", then
   the tag's "+3:40" or "104%"); lines leaving riders at the platform (a person and the count, both red; the row reads "{line} crowding") [T-2934, T-2944] where
@@ -379,7 +387,8 @@ the button is gone.
   junction or station (a tag on plain track selects nothing).
 - **Cheap on big networks**: the capacity tags and reversals come with the world as the map draws
   them; the past 24 hours' counts are asked once a game hour and when riders are worked out again
-  (`accountVersion`), not the panels' four times a second.
+  (`accountVersion`), not on the panels' refresh (up to four times a second, and no sooner than twice the last
+  answer's time after it, so about once a second on the largest games) [T-3793].
 
 ## Tutorial card
 
@@ -637,7 +646,7 @@ commuter and longer-trip bubbles, not station discs; ignored while bubbles are s
 the third by default; its hover reads "How many bubbles are aggregated together"; [T-795, T-1838]), the Colors
 choice (3-color by default [T-1724], the old Mode mix, 2-color [T-833], the old Train share, which shows two colour pickers labelled 0% train and
 100% train, Purpose [T-2886] or Color blind [T-3005]; no hovers on any of it [T-804, T-1838]; both in [ui-demand-views.md](ui-demand-views.md) "Local trip bubbles"), Station circles with a Size slider (0.5-2x, 1x by default, the station ridership circles' radius; [T-1565], [ui-demand-views.md](ui-demand-views.md) "Station ridership circles"), Show (trains, station names [off by default, T-1729], "Track at capacity" [the capacity markers; hover "Marks where stations or track cannot smoothly handle scheduled train frequencies", T-1843], "Crowded trains" [T-1152, T-1843, T-2236: the Traffic view's red edges, on by default; hover "Stretches where trains carry more than their rated load at the busiest hour"; [ui-map.md](ui-map.md) "Track display"], flat junctions and crossings [no hover, T-1843], "Lines side by side" [T-1886: lines sharing track as bands beside each other, on by default, T-2346; [ui-map.md](ui-map.md) "Lines sharing track side by side"], map labels, Real network (None, Passenger or All, then "Show stations", off by default, [ui-map.md](ui-map.md) "Real network" [T-3570]), Terrain [hover "Construction is more expensive in steep terrain", T-1843], then "Show levels" over the level buttons +3 to -3 [T-3420], with a small "Show all" button beside the label while any level is hidden [T-3593; its space is kept, so the row does not move]: all lit, a click hides that level's track, the lines on it, its stations, junction and ramp marks and the cars of trains on it, and picks pass over them, so pieces laid exactly over each other at two levels can be reached; a ramp fades toward a hidden level; no hovers; kept while the page is open, not remembered, so a reload never opens on a map missing a level; under them "Buses and ferries", ticked by default, unticked hides every bus and ferry line's route, stops and vehicles on the map and from picks, kept while the page is open as the levels are, the Lines tab hides lines one by one, [ui-inspectors.md](ui-inspectors.md) "Hiding lines"), then Game (right after Show; below), Riders on trains
-and platforms: no setting, since each train's fullness and each platform's filling up are always drawn [T-164, T-3579], Stations up close (Faces and Sound, both on by default, no hovers [T-1843], and a Volume slider while Sound is on, the one volume for every sound, building and fare-change sounds included [T-1725]; [ui-map.md](ui-map.md) Life at stations) [T-686], Map (Flat or Globe, flat by default; hover "Zoomed in to a city, the globe becomes the flat map"; [ui-map.md](ui-map.md) "Globe") [T-033], then two sliders: Line width (50-200% of the drawn width of lines, track, casings and trains, 100% by default; station shapes and picking follow it; once double track parts into its two tracks up close, those keep their width on the ground) [T-1248] and Base map (contrast, 0-100%, 100% by default: below it every basemap colour but water and the land, so roads, parks, woods, buildings, boundaries and airfields, is mixed that much toward the land colour, in both themes, the basemap's labels fade toward transparent by it instead, text and halo alike, so a faded name never leaves a pale patch on water [T-1266]; the real network is left as it is, T-1291; `map/basemap.ts`) [T-1249], and "Rotate map with right drag" (off by default, Anita 2026-11-02: with no tilt it adds little; off turns the map back to north; [ui-map.md](ui-map.md) "Globe") [T-2031], and "Show zoom buttons" (on by default: a plus and a minus at the map's right edge, halfway down, one zoom step a click with the map's own easing, `ui/ZoomButtons.tsx`; no hover, just aria labels) [T-3268], Theme (Light or Dark, light by default, over Pink, Blue or Green) [T-039], Panel and text size, Units (US units, Currency), Performance (Use more cores, Run in background, Recalculate trips while paused, Memory), Default bullet shapes (below), then,
+and platforms: no setting, since each train's fullness and each platform's filling up are always drawn [T-164, T-3579], Stations up close (Faces and Sound, both on by default, no hovers [T-1843], and a Volume slider while Sound is on, the one volume for every sound, building and fare-change sounds included [T-1725]; [ui-map.md](ui-map.md) Life at stations) [T-686], Map (Flat or Globe, flat by default; hover "Zoomed in to a city, the globe becomes the flat map"; [ui-map.md](ui-map.md) "Globe") [T-033], then two sliders: Line width (50-200% of the drawn width of lines, track, casings and trains, 100% by default; station shapes and picking follow it; once double track parts into its two tracks up close, those keep their width on the ground) [T-1248] and Base map (contrast, 0-100%, 100% by default: below it every basemap colour but water and the land, so roads, parks, woods, buildings, boundaries and airfields, is mixed that much toward the land colour, in both themes, the basemap's labels fade toward transparent by it instead, text and halo alike, so a faded name never leaves a pale patch on water [T-1266]; the real network is left as it is, T-1291; `map/basemap.ts`) [T-1249], and "Rotate map with right drag" (off by default, Anita 2026-11-02: with no tilt it adds little; off turns the map back to north; [ui-map.md](ui-map.md) "Globe") [T-2031], "Use legacy time speed controls" (off by default, T-3765; the top bar's older pause, 1x, 4x and custom-speed buttons, `Speed` in `ui/TopBar.tsx`), and "Show zoom buttons" (on by default: a plus and a minus at the map's right edge, halfway down, one zoom step a click with the map's own easing, `ui/ZoomButtons.tsx`; no hover, just aria labels) [T-3268], Theme (Light or Dark, light by default, over Pink, Blue or Green) [T-039], Panel and text size, Units (US units, Currency), Performance (Use more cores, Run in background, Recalculate trips while paused, Memory), Default bullet shapes (below), then,
 when accounts are on, Account [T-1139]: who is logged in ("Logged in as alice", "Logged in with
 Google" or "Not logged in") and a button, Account settings or Sign in, that opens the same account
 panel as the icon at the top and the start menu's (sign in, recovery email, change password, sign
@@ -697,8 +706,10 @@ the game is paused start no demand solve; the first moment the game runs again, 
 (the lighter map and its Auto are gone, DECISIONS.md 2026-11-12; a stored Low is dropped). A **Memory** row ends the section:
 "1.4 GB / 8 GB", the memory the game takes now against the most it aims for here (`memBudget`: 8 GB, or 0.75 of a device
 that reports less; 6 where the browser does not say), red above 85% of it, refreshed every 2 s while Settings is open; hover, two lines,
-"About 0.5 GB more per 1,000 stations" and "8 GB limit is an estimate" [T-3329; `game/memoryEstimate.ts`]. The reading is 1.15 GB plus
-1.76 times what the demand workers report (WASM and heap), within about 0.2 GB of the browser's own total over 22 runs (notes/T-3329.md).
+"About 0.5 GB more per 1,000 stations" and "8 GB limit is an estimate" [T-3329; `game/memoryEstimate.ts`]. The reading is from the demand
+workers' WASM memory (`workers/liveMemory.ts`, T-3757): 1.17 GB, plus 2.69 times the largest solving worker's and the aux
+worker's (what grows with the network), plus 1.56 times each further solving worker's; within about 20% of the browser's own
+total from a fresh game to a 7,070-station game on 3 solving workers (notes/T-3757.md).
 
 **Game** [T-728], right after the Show section [T-3579]: the game's mode, "Normal" or "Sandbox" (hover: what
 it means). A normal game has "Switch to sandbox mode", which asks first ("Confirm?", then
@@ -715,7 +726,8 @@ track turned around, lines rerouted), each row a click that shows the place and 
 and closes the list; under the row "3 places to fix after the switch" (or "Nothing left to fix after the switch")
 with Show list, until another game opens. In a normal game a
 row "Tutorial" with a Start again button (restarts the [tutorial card](#tutorial-card))
-sits under the mode [T-1822, T-1835]. Last in the section, "Buses obey one-way streets" [T-3480; moved here from Show, T-3579], off by default and remembered
+sits under the mode [T-1822, T-1835]. Then "Name new stations after their complex" [T-3759], on by default
+and remembered in the browser, shown before a game is loaded too ([ui-inspectors.md](ui-inspectors.md) "Renaming"). Last in the section, "Buses obey one-way streets" [T-3480; moved here from Show, T-3579], off by default and remembered
 in the browser: a bus route runs a one-way street only its way, with arrows on those streets in the bus tool. It shows before a game is loaded too.
 
 ## Finances tab (id `money`)
@@ -776,7 +788,10 @@ line's slope on screen never changes with zoom ($30 at 200 km). The fare axis st
 where the base fare would otherwise stand above a quarter of the height: then the base fare sits at a
 quarter of the height. Fare ticks fall at every multiple of the smallest nice step of at least a
 quarter of the fare shown, distance ticks every nice step of at least a fifth of the distance shown,
-the last labelled with the unit. The curve has exactly three nodes. The first, the base fare, stays
+the last labelled with the unit. The Money tab sets three nodes; a curve of any other count (set in
+"Advanced fares" below) still shows and drags here, and the rows under the graph give way to one line, "Set in
+Advanced fares" [T-3739]. An "Advanced" button left of the graph's undo opens that panel on the tab's country.
+The first node, the base fare, stays
 at 0 km and drags up and down only; the other two drag either sideways (distance) or up and down
 (fare), whichever way the pointer first moves 3 graph units, and only that way for the rest of the
 drag. Hovering a node draws small grey arrows the ways it drags (two for the base fare, four for the
@@ -842,6 +857,77 @@ country's scale: in a save from before T-1906 a country's fares are the curve ti
 rounded to a cent under $0.25, 5 cents under $10, 50 cents under $100, then a dollar; in a newer game
 each country charges the round start curve it would have had as a new game's [T-1662, T-1906, `game/fareDefault.ts`]. Rules: [track-and-service.md](track-and-service.md)
 6.4. The economy's 100x scaling is in the hover of "A day at this schedule".
+
+### Advanced fares
+
+[T-3739, `ui/AdvancedFares.tsx`, notes/T-3739.md] A centred modal like the schedule panel's, 600 px wide, its top
+fixed (rows coming and going under the graph never move the graph under the pointer); closed by its x, Esc or a
+click outside. Top to bottom: "Fares in [country]" (a picker of the listed countries, starting on the Money tab's)
+with the graph's undo and zoom; the fare graph at 560 by 260 units, the Money tab's rules but for drags, which may
+come right up to a neighbour (0.1 km) so a drag can make a step; the rows as the Money tab's, each stretch's with a
+bin ("Remove point"; the base fare has none), their amount boxes one width (64 px, seven characters such as "+$55.50"
+or "+¥1,500") with the figure centred [T-3749, T-3751]; "Add point" (pressed while armed; off at 12 points, hover "At
+most 12 points") and, for a curve of other than three points, "Use simple curve", which asks "Go back to three points
+at 0, 20 and 100 km? The other points are dropped." and keeps the fares at those distances; the high-speed, bus, ferry
+and transfer rows as the Money tab shows them; the estimate rows while a change is unsolved; the countries: the
+reference country, then every country with a built station by name, each row its multiple (the reference a plain
+1.00x), its base fare as charged and the anchor and undo buttons, under one row of column heads, "Fares by country"
+(bold, over the names), "Multiple" and "Base fare" [T-3749]. Esc in a typed value's box cancels the typing and keeps
+the panel. **Steps in the rows** (the panel's only; the Money tab's three rows stay rates) [T-3749]: a stretch of
+0.5 km or less that is not the last reads as a step, one row
+"10 km" with the fare's jump there, "+$2.50" with no "per km" (stepped by the base fare's step, typed, never below
+$0; a change keeps the step's width and moves every later point's fare by the same amount); the stretch after it
+reads from the step's distance ("10 - 40 km", "Past 70 km"). The step's distance is its row's typed box ("[10] km";
+plain at 0 km), which moves the whole step, its width and every rate kept; the stretch before a step shows its end
+as plain text ("0 - 10 km"), since it is the same number [T-3751]. **Add point**: pressed, the next click
+on the graph adds a point there (the dock's graph never adds), and the button lets go; Esc lets go first, a second
+Esc closes. While armed the points take no clicks, the curve with the new point is drawn dashed over the faded one
+with a hollow dot where it would go, and the plot's hover reads "Click to add a point here" over its distance and
+fare. The point's distance snaps as a drag's; within 8 graph units of a point sideways it goes 0.1 km after it when
+the pointer is above that point's fare and 0.1 km before it when below, so a click over a point makes a step. Its
+fare snaps as a drag's, is taken as a neighbour's within one snap step, and is held between its neighbours' fares;
+where nothing fits (before the base, between two points 0.1 km apart) the click does nothing. Each add and remove is
+one fare edit (one recalculation, Ctrl+Z, which the panel passes on). The drag estimate averages each line's fare
+change over trips 0.4 to 1.6 times its mean length (`fareEstimate.ts`), so moving a step shows gradually. Room is
+left below the fare zones for a fare per stop (T-3744).
+
+**Fare zones** [T-3740, `AdvancedFares.tsx` `FareAreas`, the rule in track-and-service.md "Fares and the ledgers"]:
+above the countries, the heading "Fare zones" (bold, over a rule, with a hover on the charging rule), then each fare area: its name in a box that reads
+as plain text until hovered (typed over, Enter or leaving it renames; no recalculation), "Paint stations" with a
+brush, which closes the panel and starts the Fare zones tool on that area, and, left of a bin ("Remove fare area", asking
+"Remove {name}? Trips between its stations pay by distance again."; its stations keep their codes, which count as
+none until Z3 tidies them), the game's usual checkbox with no text, ticked while the area is on (hover "Disable {name}" or "Enable {name}"; T-3783, T-3791; off, trips pay by distance as if the area did not exist, its paint, name and prices kept and its price rows dimmed; `FareArea.off` in the header's `fares.zones`, sent as a `fareZones` edit like removal, so not undone; `demandFares()` leaves an off area out); then one row per zone count, "1 fare zone", "2 fare zones" ..., as many as the area's
+highest zone painted and at least three, each its price as charged in the panel's country (a hover on each: what rides it is for; the stored price times
+that country's rate multiple, `countryFareScales`, as demand charges it; never below the base fare) in a stepper by the base fare's step, typed on a click. A price
+change keeps prices from falling: the later ones rise to it, the earlier ones come down to it. Last, "New fare area",
+which makes an area named "{city} fare zones" for the city in view, or the one holding most of the player's stations when none is in view ("Fare area 2" with none), "{city} fare zones 2",
+3 ... when an area has that name already (T-3791: names never repeat, so an area made twice by mistake shows), its prices the curve's
+fares at 5, 10, 15 km and so on, and starts the tool on it. A game with no fare area shows only the heading and
+that button; nothing else in the game changes.
+
+**The Fare zones tool** [`map/fareZoneTool.ts`, `game/fareZonePaint.ts`, `ui/FareZoneParts.tsx`], tool id `fares`
+(no Build tab button; started from the panel): its bar at the map's top centre, as the station tool's, with the area
+(a picker once there are two) and "Fare zone" with a stepper of the zone a click gives, 1 to 12 on its colour or
+"none" (which takes stations of that area out of it, leaving other areas' stations alone); the click mode's descriptor "Painting fare zones" and the hint
+"Click a station or drag around several." ("Tap a station or draw around several." on touch). A click on a station
+(within 14 px, from zoom 9 where stations are drawn) gives it and its whole complex the zone; a left drag draws a loop (kept in map coordinates, so zooming or panning mid-drag leaves it on the ground), dashed and shaded in the
+zone's colour, ringing the stations it would change (with "none", only those of the picked area), and on release every station inside (and their complexes) takes
+it. A station is in one fare area at most (T-3791): when a click or loop takes in a complex shown in another area, the
+game asks first ("Some of these stations are in another fare area. Move them to this one?", "Move stations" or
+Cancel); Move stations moves them into this area, Cancel (or Esc) paints only the others. Linking stations (the passage) asks the same when their complexes are in different areas: Move stations puts both in the first station's area, Cancel makes no link; with an area on one side only the other joins it, no question (the link and the move are two Ctrl+Z steps; a link has none of its own, T-3796). Each click or loop is one
+`stationFares` edit (one recalculation of trips, one Ctrl+Z), and none when no station would change. The right or middle button drags the map; on touch one finger draws the loop, a tap paints, two
+fingers pan and zoom (MapLibre's touch pan held to two fingers while the tool is on). Esc drops a loop being drawn,
+then leaves the tool. While the tool is on the ground near each painted station is tinted in its zone's colour (one
+colour per zone number, `FARE_ZONE_COLOURS`), under the network: each painted complex (or lone station) owns its
+cell, the ground nearer it than any other painted one (every area's in one diagram, so cells never overlap) within
+650 m (at least 7 px on screen), drawn as vector shapes at 22% with a 2.5 px band at 80% inside each zone's edge (the
+cell's arcs, and sides facing another zone or area; none between cells of one zone). A complex takes the zone of its
+first painted station, as the station panel and demand do. Every painted complex or lone station has a disc with its
+zone number beside it, above left first, else the first of seven other spots clear of the station names and the
+numbers already drawn; where none is clear (stations crowded far out) it is left out. Off the tool nothing is drawn.
+The station panel has a "Fare zone" row (a stepper, the same values) while the fares have an area: a station's own,
+or in the complex view the complex's, stepping every station of the complex at once in its area (or the tool's when
+it has none), the area's name in the label's hover when there are two or more.
 
 ## Cities tab
 
@@ -1023,8 +1109,9 @@ keeps what it had and earns no more.
     next load.
 
 **Memory a game takes** [T-3329]: a line under the facts of every card with stations, just "2.5 GB" (hover "Uses about 2.5 GB of memory"), from the
-station count (1.8 GB plus 0.65 GB per 1,000 stations plus, per solving worker past the first, 0.2 GB and 0.2 GB per 1,000
-stations, as many as the pool's memory rule lets run, T-3373; within about 0.2 GB on the real-network saves). Where the browser reports the device's memory (Chrome, Edge) or is 32-bit, a game over the budget
+station count (1.64 GB plus 0.8 GB per 1,000 stations plus, per solving worker past the first, 0.1 GB and 0.3 GB per 1,000
+stations, as many as the pool's memory rule lets run and, past the first, only while they fit in the budget, T-3373,
+T-3757; within about 20% on the real-network saves and players' 53-64 city games). Where the browser reports the device's memory (Chrome, Edge) or is 32-bit, a game over the budget
 shows it in red and its Open (saves panel and start menu, not the versions list) first asks "This game needs about 5 GB of
 memory and this device has about 4. It may not load." with Open anyway and Cancel. Elsewhere the line is plain and nothing asks.
 This is separate from the refusal [T-1197], which judges a save by its zones and still blocks a game no worker can hold.
@@ -1083,6 +1170,10 @@ This is separate from the refusal [T-1197], which judges a save by its zones and
   versions start open, the first row "Last undamaged copy · Saved Nov 14 at 15:31 · Day 26 · 164
   stations" with "Open a copy" (a new slot, as a backup opens); with none, a muted line under the
   card's foot, "No undamaged copy of this game is left".
+- **A game that failed to open** [T-3773; architecture.md "No slot is written over"]: the page is back on the
+  start menu, whose grey line says "Cut short could not be opened." once (a file, a
+  backup or a viewed network: the reason alone), and the card's red line gives the reason until the game opens:
+  "This save is damaged.", "This save could not be opened (<panic>).", or the device's out-of-memory line.
 - **A game saved by a newer version** [T-1826; architecture.md "Saves from a newer build"]: the
   top bar and the callout say "This game was saved by a newer version. Reload the page to
   update."; Save refuses with the same words (its hover too). Download's hover is "Download as a
@@ -1291,7 +1382,7 @@ server `trainworld_community.go`, its `docs/trainworld-api.md` "Community"; note
   "Guangzhou - kanocifer isn't saved." with Save. Its play time counts from its Save, as a slot's does.
 - **A copy never ranks**: its header carries `copy` (the share's id), the saves list marks it Copy (hover "Never on
   the leaderboards"), it sends no figures and no achievement counts, and sharing it tells the server it is a
-  sandbox, so it shows tagged Sandbox and only in Random. It plays as a normal game otherwise.
+  sandbox, with the reason (copy), so it shows tagged Copy and only in Random (a real sandbox shows Sandbox). It plays as a normal game otherwise.
 - **What goes up with the tick**: the save as the game writes it, minus the Getting started card's progress, and the
   game's name beside it (through the server's name filter on upload and on read, blanked if it fails; it names the
   copy and is shown nowhere else). Account and device ids, playtime and settings are never in a save. Line and group names are, and
@@ -1307,19 +1398,34 @@ server `trainworld_community.go`, its `docs/trainworld-api.md` "Community"; note
   line's bullet and name, "schedule" in grey, then the mode choice, drawn only once Detailed and
   Exact are built (stages 3 and 6; Simple alone shows no choice). A player who never opens it sees nothing else new.
 - **Left**: the line panel's schedule table, its steppers, dots and hovers, under a "Set by" Trains / Headway
-  switch; an edit here is the line panel's edit. The table has two sections (T-3521), each a bold heading row
+  switch; an edit here is the line panel's edit. **Periods** (T-3542; a bus or ferry line's window too, T-3767): under Set by,
+  "Periods" 3 / 4 / 5 sets every line's rows for the whole game (lines with their own setting aside); "Set for this
+  line" at the end of that row (hover "By default, periods are set globally. Click to set just for this line", T-3795)
+  gives the line its own (at the rows it has), shown as a "This line" 3 / 4 / 5 under the game's with "Same as game"
+  at the end of its row. A change of periods shows its rows before the trains and riders catch up (T-3795). Three rows are High, Medium, Low under "Demand" (as before); four are
+  Rush (06:00-10:00 and 16:00-20:00), Midday, Evening, Night and five Morning, Midday, Afternoon, Evening, Night,
+  under "Period", each name's hover its hours ("Rush: 06:00-10:00, 16:00-20:00"). **Hours** (stage 2): a column
+  "Hours" after the names in the Weekdays rows, each row's hours in a box ("6-10", rush "6-10, 16-20", an evening
+  past midnight "20-1"), typed in whole hours; the game's, or the line's own once it has its own periods. Hours that
+  leave a row under two hours (high on three rows under six) are refused: the box shakes with the refusal's knock
+  and a red line under the row says "2 hours at least" for five seconds. The row now (bold) and the names' hovers
+  follow the hours; the window's left side is 330 px wide. A switch to fewer rows (the game's,
+  this line's, or Same as game) first asks "Confirm?" with the rows it joins and what they run: "Morning, midday and
+  afternoon will run 26 trains, the most of the three" (a headway line: "will run every 4 min, the shortest of the
+  three"; the game's: "... will run the most trains of the three on every line without its own periods"), yes "Use 3
+  periods" in red, no "Keep 5 periods". The line panel shows the line's rows (weekdays only) and nothing else of periods. The table has two sections (T-3521), each a bold heading row
   with room above it: **Weekdays**, the line panel's rows, and **Weekends** (hover "Weekends and public
-  holidays"), a row a level with the same steppers on the line's weekend counts (under headways a headway
+  holidays"), a row for each weekday row with the same steppers on the line's weekend counts (under headways a headway
   stepper, the count beside it; the headway stepped to is kept with the counts and the weekends run it, T-3557),
   its headway the rate settled for weekends. Beside the Weekends heading the
   line's percent of its weekdays in a stepper (5% a click, typed 10-200), greyed with the hover "Weekend service
   set by hand" once a weekend count is stepped, and "Apply to all lines", which asks "Set weekends to 70% of weekdays on every line, and on new lines too?" first (new lines start on that percent, `SaveHeader.newWeekendShare`, T-3588). The level in force is bold in today's section only; each section's dots are its
   own kind of day's (today's, else a weekday's or a Saturday's). A stepper's hover counts the fleet over both
   kinds of day. Under the table, **Headways for new regular, tram, high-speed, bus or ferry lines** (the heading names the selected line's kind): the headways every new line of that kind starts with, "Default not set" until the player sets one (a new game has none, so a first rail line runs on train counts; without a default a rail line starts on counts, which give no fixed headway to show; a bus or ferry line shows its tool's headways until one is set, 8, 15 and 30 min for a bus, 20, 30 and 60 for a boat, `NEW_LINE`), a "Set as default" button that makes this line's headways the default for its kind (a line on counts is switched to Headway first at the headways its trains give, so it runs the same service; off while they already are) and "Use default", which gives the line its kind's default (off while there is none or the line already runs it). The row uses the table's 12 px text
-  (T-3543, T-3588, T-3703; saved with the game, `SaveHeader.newHeadway` {rail, tram, fast, bus, ferry}; the clock worker applies them to each new rail line after it is
+  (T-3767: the list has one headway per row of the selected line; a default set from a line of three rows is high, medium and low, and read at four or five rows runs high's in the morning, at midday and in the afternoon; one set from a line of four or five rows keeps a headway per period, and a line of fewer rows reads each row as the shortest of its periods'; a new line takes one for each of the game's rows) (T-3543, T-3588, T-3703; saved with the game, `SaveHeader.newHeadway` {rail, tram, fast, bus, ferry}; the clock worker applies them to each new rail line after it is
   made, as a second edit, a line that cannot pay for the trains they ask staying on its counts, and makes a new bus or ferry line at them; a new bus or ferry line takes the weekend percent for new lines as a rail line does). Then the departures board.
-- **A bus or ferry line's** (T-3703): the left side alone, in buses or boats, in a panel 360 px wide: the table with
-  its Weekdays and Weekends sections and the default headways, with no track limits and no departures board or
+- **A bus or ferry line's** (T-3703): the left side alone, in buses or boats, in a panel 360 px wide: the periods,
+  the table with its Weekdays and Weekends sections and its hours, and the default headways, with no track limits and no departures board or
   timetable (the sim keeps no trip timetable for bus and ferry lines).
 - **Right**: the timetable over the chart.
 - **Departures**: headed "Departures" with a station picker (the line's stops in order, each station once, the first stop to start), then

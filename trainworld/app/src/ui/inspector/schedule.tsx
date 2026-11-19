@@ -4,14 +4,15 @@
 // Changing to trains row) the panel passes in.
 
 import type { ComponentChildren } from "preact";
+import { useEffect, useRef, useState } from "preact/hooks";
 import { lineMoneyTip, Money } from "../MoneyText";
 import { count, duration, headway, money, speed, trainKind } from "../../game/format";
 import { lowerWord, t, tList, tNumber, tSeries } from "../../i18n";
 import { pctWhole } from "./tripText";
 import { crowdColour } from "../../game/palette";
-import { hourSpan, levelHours, PERIODS } from "../../game/periods";
+import { CUTS_DEFAULT, hourSpan, levelHours, PERIODS, rowAt, rowHourSpans, rowHoursText, rowsOf, typedHours, type Cuts, type Row as PeriodRow } from "../../game/periods";
 import { lineReversed } from "../../game/northUp";
-import { crowdLevel, dayNote, endNames, hasTrains, PERIOD_STRIDE, pendingOf, pendingRiders, profitKnown, runningToday, today, upkeepToday } from "../../game/today";
+import { crowdIn, dayNote, endNames, hasTrains, PERIOD_STRIDE, pendingOf, pendingRiders, profitKnown, runningToday, today, upkeepToday } from "../../game/today";
 import { accountVersion, capacity } from "../../game/boarding";
 import { onRails, vehicleCars, vehicleOf, type Vehicle } from "../../game/vehicle";
 import { lineSeconds } from "../../game/clock";
@@ -24,8 +25,8 @@ import { pendingLabel } from "../../game/lineFigures";
 import { headwaysFor, lineKind, makeDefaultHeadway, newHeadway, applyDefaultHeadway } from "../../game/newHeadway";
 import { liveMoney, moneyState, type MoneyState } from "../../game/money";
 import { demandView, lineFiguresIn } from "../../game/demand";
-import { AUTO_SLACK, autoTrainsFor, headwayFromMinutes, headwayShown, nextHeadway, refusedForCash, restHeadwayStep, restTphShown, setAutoTrains, setHeadway, setTrainCount, setWeekendCount, setWeekendShare, setWeekendShareAll, stepHeadway, stepTrainCount, stepWeekendCount, stepWeekendHeadway, trainCap, typeWeekendHeadway, trainsShown, weekendShown, world, MAX_TYPED_VEHICLES, WEEKEND_SHARE_STEP } from "../../game/world";
-import { Row, Segmented, Stepper } from "../widgets";
+import { AUTO_SLACK, autoTrainsFor, headwayFromMinutes, nextHeadway, pairRows, refusedForCash, restHeadwayStep, restRowTphShown, rowCount, rowHeadwayShown, rowTrainsShown, rowWeekendShown, knock, setHours, setRowAuto, setRowCount, setRowHeadway, setRowWeekendCount, setRowWeekendShare, setWeekendShareAll, stepRowCount, stepRowHeadway, stepRowWeekendCount, stepRowWeekendHeadway, trainCap, typeRowWeekendHeadway, world, MAX_TYPED_VEHICLES, WEEKEND_SHARE_STEP } from "../../game/world";
+import { Row, Segmented, shakeEl, Stepper } from "../widgets";
 import { demandPending, Spinner } from "../Spinner";
 
 /** A demand level's name, capitalised: "High". */
@@ -102,31 +103,47 @@ const headwayText = (s: number) => (s > 0 ? t("inspector.min", { n: tNumber(s / 
 /** How long a refused edit's control shakes, ms (T-625; style.css `.shake`) */
 const SHAKE_MS = 300;
 
-/** One demand level's vehicles and headway cells: a count stepper and the headway it gives, or (T-625)
+/** T-3542: a line's figures per row (its own for four or five rows, else its three levels'), as the
+ * schedule table reads them. */
+interface RowsOf { n: number; rows: PeriodRow[]; trip: readonly number[]; settled: readonly number[]; autoSettled: readonly number[] | null }
+function rowsFigs(st: LineStats): RowsOf {
+  const r = st.rows, n = rowCount(st);
+  return { n, rows: rowsOf(n), trip: r ? r.roundTrip : st.roundTripByLevel, settled: r ? r.trains : st.trainsNeeded, autoSettled: r ? r.auto : st.autoS };
+}
+/** Row `i`'s trains an hour on weekdays, with a hidden twin's (T-3333). */
+function rowTph(l: LineInput, st: LineStats, i: number): number {
+  const w = world.value;
+  if (st.rows && w) return pairRows(w, st)!.tph[i] ?? 0;
+  const d = DEMANDS[i], twin = st.twin ? w?.save.lines.find((x) => x.id === st.twin) : undefined;
+  return l.tph[d] + (twin?.tph[d] ?? 0);
+}
+
+/** One row's vehicles and headway cells: a count stepper and the headway it gives, or (T-625)
  * the headway stepper and the count it gives. A count an edit was refused for cash is red, and
- * its control shakes once; a headway shorter than `limit` allows is red (T-625, T-679). */
-function LevelCells({ l, st, d, auto, limits }: { l: LineInput; st: LineStats; d: Demand; auto: [number, number, number] | null; limits: (Limit | null)[] }) {
+ * its control shakes once; a headway shorter than `limit` allows is red (T-625, T-679). `lev`: the
+ * row (T-3542: of three, four or five). */
+function LevelCells({ l, st, lev, auto, limits }: { l: LineInput; st: LineStats; lev: number; auto: readonly number[] | null; limits: (Limit | null)[] }) {
   const v = vehicleOf(st);
-  const lev = DEMAND_INDEX[d];
-  const trip = st.roundTripByLevel[lev];
-  const limit = limits[lev];
+  const f = rowsFigs(st);
+  const trip = f.trip[lev];
+  const limit = limits[lev] ?? null;
   const lim = limit?.s ?? 0;
   const loop = loopHalves(st);
   // T-1276: a headway or count still on its way to the worker (an edit takes seconds on a big
   // network) shows the other cell as it will be, not the world's from an edit or two before
-  const autoPending = auto ? auto.map((s, i) => s !== st.autoS?.[i]) : null;
-  const counts = (auto
-    ? st.trainsNeeded.map((n, i) => (autoPending![i] ? autoTrainsFor(st.roundTripByLevel[i], auto[i], limits[i]?.s ?? 0, loop) : n))
-    : (trainsShown(l.id) ?? st.trainsNeeded)) as [number, number, number];
-  const countPending = !auto && counts[lev] !== st.trainsNeeded[lev];
+  const autoPending = auto ? auto.map((s, i) => s !== f.autoSettled?.[i]) : null;
+  const counts = auto
+    ? f.settled.map((n, i) => (autoPending![i] ? autoTrainsFor(f.trip[i], auto[i], limits[i]?.s ?? 0, loop) : n))
+    : (rowTrainsShown(l.id) ?? f.settled);
+  const countPending = !auto && counts[lev] !== f.settled[lev];
   // T-3521: a weekday change buys or frees only past the weekends' trains
-  const others = weekendShown(l.id)?.counts ?? [];
+  const others = rowWeekendShown(l.id)?.counts ?? [];
   const r = refusedForCash.value;
   const refused = r && r.id === l.id && r.levs[lev] ? r : null;
   const broke = refused !== null && liveMoney.value.cash < refused.need;
   const shake = refused !== null && performance.now() - refused.at < SHAKE_MS;
   // the tutorial's marks are on a train line's cells
-  const guide = !onRails(v) ? undefined : d === DEMANDS[0] ? "trains" : counts[lev] < 1 ? "levels" : undefined;
+  const guide = !onRails(v) ? undefined : lev === 0 ? "trains" : counts[lev] < 1 ? "levels" : undefined;
   const wrap = (child: ComponentChildren) => <span key={refused?.at ?? 0} class={shake ? "shake" : undefined} data-guide={guide}>{child}</span>;
   const n = <span class={broke ? "bad" : undefined}>{counts[lev]}</span>;
   // T-798: a loop's trains are half each way, so its count steps by two
@@ -134,22 +151,21 @@ function LevelCells({ l, st, d, auto, limits }: { l: LineInput; st: LineStats; d
   if (!auto) {
     const over = limit !== null && counts[lev] > 0 && counts[lev] - trip / limit.s > 0.01;
     // T-3333: a line on both pairs: its hidden twin's trains an hour too
-    const twin = st.twin ? world.value?.save.lines.find((x) => x.id === st.twin) : undefined;
-    const tph = countPending ? (trip > 0 ? (counts[lev] * 3600) / trip : 0) : l.tph[d] + (twin?.tph[d] ?? 0);
+    const tph = countPending ? (trip > 0 ? (counts[lev] * 3600) / trip : 0) : rowTph(l, st, lev);
     // T-3165: one train more than the track lets run, so one is held and the held messages show
     const cap = trainCap(st, trip, limit?.capS ?? null);
     const full = counts[lev] >= cap;
-    const grow = (to: number) => setTrainCount(l.id, d, Math.min(to, cap));
+    const grow = (to: number) => setRowCount(l.id, lev, Math.min(to, cap));
     return (
       <>
         <td>
           {wrap(<Stepper value={n} label={t("schedule.stepperLabel", { vehicle: v })} jump
-            onStep={(s) => (s > 0 ? !full && grow(counts[lev] + s * k) : stepTrainCount(l.id, d, s))}
+            onStep={(s) => (s > 0 ? !full && grow(counts[lev] + s * k) : stepRowCount(l.id, lev, s))}
             type={{ text: String(counts[lev]), set: (x) => {
               const to = Math.max(0, Math.round(x)), now = counts[lev];
               if (to === now) return;
-              if (to < now) { setTrainCount(l.id, d, to); return; }
-              return !full && setTrainCount(l.id, d, Math.min(to, cap)) && to <= cap ? undefined : false;
+              if (to < now) { setRowCount(l.id, lev, to); return; }
+              return !full && setRowCount(l.id, lev, Math.min(to, cap)) && to <= cap ? undefined : false;
             } }}
             tipDown={changeTip(counts, lev, Math.max(0, counts[lev] - k), st, others)}
             tipUp={full && limit !== null && cap < MAX_TYPED_VEHICLES ? limitText(limit, v) : changeTip(counts, lev, counts[lev] + k, st, others)} />)}
@@ -165,13 +181,13 @@ function LevelCells({ l, st, d, auto, limits }: { l: LineInput; st: LineStats; d
         <span class={"num" + (broke ? " bad" : "")} data-tip={loop
           ? t("schedule.lapTip", { vehicles: vehiclesText(v, counts[lev]), half: counts[lev] / 2, lap: duration(trip / 2) })
           : st.loop ? t("schedule.lapOneWayTip", { vehicles: vehiclesText(v, counts[lev]), lap: duration(trip) })
-          : t("schedule.roundTip", { vehicles: vehiclesText(v, counts[lev]), trip: duration(trip) })}>{counts[lev]}</span>
+          : t("schedule.roundTip", { vehicles: vehiclesText(v, counts[lev]), count: counts[lev], trip: duration(trip) })}>{counts[lev]}</span>
       </td>
       <td>
-        {wrap(<Stepper wide jump jumpUnit={t("schedule.minUnit")} label={t("schedule.headwayLabel")} value={short ? <span class="bad">{headwayText(auto[lev])}</span> : headwayText(auto[lev])} onStep={(s) => stepHeadway(l.id, d, s)}
+        {wrap(<Stepper wide jump jumpUnit={t("schedule.minUnit")} label={t("schedule.headwayLabel")} value={short ? <span class="bad">{headwayText(auto[lev])}</span> : headwayText(auto[lev])} onStep={(s) => stepRowHeadway(l.id, lev, s)}
           tipDown={changeTip(counts, lev, autoTrainsFor(trip, nextHeadway(auto[lev], -1), lim, loop), st, others)}
           tipUp={changeTip(counts, lev, autoTrainsFor(trip, nextHeadway(auto[lev], 1), lim, loop), st, others)}
-          type={{ text: auto[lev] ? String(+(auto[lev] / 60).toFixed(2)) : "0", set: (v) => setHeadway(l.id, d, headwayFromMinutes(v)), tip: short ? t("schedule.limitWait", { text: limitText(limit, v), vehicle: v }) : undefined }} />)}
+          type={{ text: auto[lev] ? String(+(auto[lev] / 60).toFixed(2)) : "0", set: (v) => setRowHeadway(l.id, lev, headwayFromMinutes(v)), tip: short ? t("schedule.limitWait", { text: limitText(limit, v), vehicle: v }) : undefined }} />)}
       </td>
     </>
   );
@@ -179,19 +195,19 @@ function LevelCells({ l, st, d, auto, limits }: { l: LineInput; st: LineStats; d
 
 // ---------------------------------------------------------------- weekends (T-3521)
 
-/** One demand level's weekend cells in the schedule panel: as the weekday row's (`LevelCells`), a
+/** One row's weekend cells in the schedule panel: as the weekday row's (`LevelCells`), a
  * count stepper and the headway it runs, or under headways the count and a headway stepper. A step
- * sets the line's weekend counts by hand (`setWeekendCount`), with the headway stepped to under headways. The headway is the rate settled for
+ * sets the line's weekend counts by hand (`setRowWeekendCount`), with the headway stepped to under headways. The headway is the rate settled for
  * weekends (`restTph`), or for a count still on its way the round trip over it. */
-function WeekendCells({ l, st, d, auto, limits }: { l: LineInput; st: LineStats; d: Demand; auto: boolean; limits: (Limit | null)[] }) {
-  const v = vehicleOf(st), lev = DEMAND_INDEX[d];
-  const week = trainsShown(l.id) ?? st.trainsNeeded;
-  const counts = weekendShown(l.id)?.counts ?? week;
+function WeekendCells({ l, st, lev, auto, limits }: { l: LineInput; st: LineStats; lev: number; auto: boolean; limits: (Limit | null)[] }) {
+  const v = vehicleOf(st), f = rowsFigs(st);
+  const week = rowTrainsShown(l.id) ?? f.settled;
+  const counts = rowWeekendShown(l.id)?.counts ?? week;
   const n = counts[lev];
-  const trip = st.roundTripByLevel[lev], limit = limits[lev];
+  const trip = f.trip[lev], limit = limits[lev] ?? null;
   // the track holds as many on a weekend as on a weekday: the weekdays' cap (T-3165)
   const most = trainCap(st, trip, limit?.s ?? null);
-  const tph = restTphShown(l.id, st, lev, n);
+  const tph = restRowTphShown(l.id, st, lev, n);
   const loop = loopHalves(st), k = loop ? 2 : 1;
   if (auto) {
     const lim = limit?.s ?? 0, h = tph > 0 ? 3600 / tph : 0;
@@ -206,14 +222,14 @@ function WeekendCells({ l, st, d, auto, limits }: { l: LineInput; st: LineStats;
           <span class="num" data-tip={loop
             ? t("schedule.lapTip", { vehicles: vehiclesText(v, n), half: n / 2, lap: duration(trip / 2) })
             : st.loop ? t("schedule.lapOneWayTip", { vehicles: vehiclesText(v, n), lap: duration(trip) })
-            : t("schedule.roundTip", { vehicles: vehiclesText(v, n), trip: duration(trip) })}>{n}</span>
+            : t("schedule.roundTip", { vehicles: vehiclesText(v, n), count: n, trip: duration(trip) })}>{n}</span>
         </td>
         <td>
           <Stepper wide jump jumpUnit={t("schedule.minUnit")} label={t("schedule.weekendHeadwayLabel")}
             value={short ? <span class="bad">{headwayText(h)}</span> : headwayText(h)}
-            onStep={(s) => stepWeekendHeadway(l.id, d, s, trip, lim, loop, most, h)}
+            onStep={(s) => stepRowWeekendHeadway(l.id, lev, s, trip, lim, loop, most, h)}
             tipDown={stepTip(-1)} tipUp={stepTip(1)}
-            type={{ text: h ? String(+(h / 60).toFixed(2)) : "0", set: (x) => { typeWeekendHeadway(l.id, d, x, trip, lim, loop, most); } }} />
+            type={{ text: h ? String(+(h / 60).toFixed(2)) : "0", set: (x) => { typeRowWeekendHeadway(l.id, lev, x, trip, lim, loop, most); } }} />
         </td>
       </>
     );
@@ -224,12 +240,12 @@ function WeekendCells({ l, st, d, auto, limits }: { l: LineInput; st: LineStats;
     <>
       <td>
         <Stepper value={n} label={t("schedule.weekendLabel", { vehicle: v })} jump
-          onStep={(s) => (s > 0 ? !full && setWeekendCount(l.id, d, n + s * k, most) : stepWeekendCount(l.id, d, s, most))}
+          onStep={(s) => (s > 0 ? !full && setRowWeekendCount(l.id, lev, n + s * k, most) : stepRowWeekendCount(l.id, lev, s, most))}
           type={{ text: String(n), set: (x) => {
             const to = Math.max(0, Math.round(x));
             if (to === n) return;
-            if (to < n) { setWeekendCount(l.id, d, to, most); return; }
-            return !full && setWeekendCount(l.id, d, to, most) && to <= most ? undefined : false;
+            if (to < n) { setRowWeekendCount(l.id, lev, to, most); return; }
+            return !full && setRowWeekendCount(l.id, lev, to, most) && to <= most ? undefined : false;
           } }}
           tipDown={changeTip(counts, lev, Math.max(0, n - k), st, week)}
           tipUp={full && limit !== null && most < MAX_TYPED_VEHICLES ? limitText(limit, v) : changeTip(counts, lev, n + k, st, week)} />
@@ -242,8 +258,8 @@ function WeekendCells({ l, st, d, auto, limits }: { l: LineInput; st: LineStats;
 /** The Weekends section's heading row: its name, the line's percent of its weekdays (greyed while its
  * counts are set by hand, since it no longer says what runs), and the button that sets every line's
  * weekends to that percent after a question. */
-function WeekendHead({ l }: { l: LineInput }) {
-  const wk = weekendShown(l.id);
+function WeekendHead({ l, cols }: { l: LineInput; cols: number }) {
+  const wk = rowWeekendShown(l.id);
   const share = wk?.share ?? 100, custom = !!wk?.custom;
   const pct = pctWhole(share / 100);
   const all = () => {
@@ -256,13 +272,13 @@ function WeekendHead({ l }: { l: LineInput }) {
   };
   return (
     <tr class="sched-day">
-      <th colSpan={3}>
+      <th colSpan={cols}>
         <span class="sched-day-row">
           <span data-tip={t("schedule.weekendsTip")}>{t("schedule.weekends")}</span>
           <Stepper value={<span class={custom ? "muted" : undefined}>{pct}</span>} label={t("schedule.weekendShareLabel")}
             tipValue={custom ? t("schedule.weekendShareOff") : undefined}
-            onStep={(s) => setWeekendShare(l.id, share + Math.sign(s) * WEEKEND_SHARE_STEP)}
-            type={{ text: String(share), set: (x) => setWeekendShare(l.id, x) }} />
+            onStep={(s) => setRowWeekendShare(l.id, share + Math.sign(s) * WEEKEND_SHARE_STEP)}
+            type={{ text: String(share), set: (x) => setRowWeekendShare(l.id, x) }} />
           <button type="button" class="btn text mini" onClick={all}>{t("schedule.weekendAll")}</button>
         </span>
       </th>
@@ -270,31 +286,52 @@ function WeekendHead({ l }: { l: LineInput }) {
   );
 }
 
-/** T-477, T-515, T-2236, T-2335: a demand level's name in the schedule table, after its crowding dot
- * on today's kind of day (`crowdLevel`, from the boarding account) while `v` has one: the fill graded
+/** T-3542: row `r`'s name for a line of `n` rows: "High" for three, "Midday" for four or five. */
+export function rowLabel(n: number, r: number): string {
+  const row = rowsOf(n)[r];
+  if (!row) return "";
+  return n === 3 ? demandLabel(DEMANDS[r]) : t("schedule.rowName", { row: row.code });
+}
+/** Row `r`'s hours by the line's hours `c`, its name's hover: "High demand period: 06:00-20:00", "Rush:
+ * 06:00-10:00, 16:00-20:00". */
+function rowTimes(c: Cuts, n: number, r: number): string {
+  const row = rowsOf(n)[r];
+  if (!row) return levelTimes(DEMANDS[r]);
+  const hours = tSeries(rowHourSpans(c, row));
+  return n === 3 ? t("schedule.levelTimes", { demand: DEMANDS[r], hours }) : t("schedule.rowTimes", { row: row.code, hours });
+}
+/** The line's hours (T-3542 stage 2), the default's for a line read before they were kept. */
+const hoursOf = (st: LineStats): Cuts => st.hours ?? CUTS_DEFAULT;
+
+/** T-477, T-515, T-2236, T-2335: a row's name in the schedule table, after its crowding dot
+ * on today's kind of day (`crowdIn`, from the boarding account) while `v` has one: the fill graded
  * over the line's stretches, the ring (1 px out with a 1 px gap) at its fullest. One hover for both
- * (T-2334): the level's hours, then the dot's. */
-function LevelName({ v, d, stops, flip, pending, ends, vehicle }: { v: Float64Array | null; d: Demand; stops: number; flip: boolean; pending: boolean; ends?: [string, string]; vehicle: Vehicle }) {
-  const c = v ? crowdLevel(v, d, stops, flip, ends, vehicle) : null;
+ * (T-2334): the row's hours, then the dot's. */
+function LevelName({ v, n, r, stops, flip, pending, ends, vehicle, hours }: { v: Float64Array | null; n: number; r: number; stops: number; flip: boolean; pending: boolean; ends?: [string, string]; vehicle: Vehicle; hours: Cuts }) {
+  const c = v ? crowdIn(v, rowsOf(n)[r].periods, stops, flip, ends, vehicle) : null;
   return (
-    <span data-tip={c ? `${levelTimes(d)}\n${c.tip}` : levelTimes(d)}>
-      {c ? <i class="crowd-dot" style={{ background: c.fill, outlineColor: crowdColour(c.peak) }} data-guide={d === "high" ? "crowd" : undefined} />
+    <span data-tip={c ? `${rowTimes(hours, n, r)}\n${c.tip}` : rowTimes(hours, n, r)}>
+      {c ? <i class="crowd-dot" style={{ background: c.fill, outlineColor: crowdColour(c.peak) }} data-guide={r === 0 ? "crowd" : undefined} />
         : pending && <Spinner class="row-dot" tip={t("schedule.waitingDemand")} />}
-      {demandLabel(d)}
+      {rowLabel(n, r)}
     </span>
   );
 }
 
-/** The Schedule heading, its Trains (Buses, Boats) or Headway switch, and the table of levels. `crowd`:
- * the line's periods for the crowding dots (a rail line's); `copy`: the copy and paste buttons;
- * `label`: the heading's words in place of "Schedule" (the schedule panel's "Set by", T-3346);
- * `weekends`: a Weekdays and a Weekends section (the schedule panel's, T-3521). */
-export function Schedule({ l, st, now, limits = NO_LIMITS, crowd = null, canAuto = true, copy, label, weekends = false }: {
-  l: LineInput; st: LineStats; now: Demand; limits?: (Limit | null)[]; crowd?: Float64Array | null; canAuto?: boolean; copy?: ComponentChildren; label?: string; weekends?: boolean;
+/** The Schedule heading, its Trains (Buses, Boats) or Headway switch, and the table of rows. `period`:
+ * the period now in the line's local time (its row is bold); `crowd`: the line's periods for the
+ * crowding dots (a rail line's); `copy`: the copy and paste buttons; `label`: the heading's words in
+ * place of "Schedule" (the schedule panel's "Set by", T-3346); `hours`: the Hours column (a rail line's
+ * schedule window, T-3542); `weekends`: a Weekdays and a Weekends
+ * section (the schedule panel's, T-3521; T-3542: the row now by the line's own hours, `period` unread); `above`: rows the schedule panel puts under the heading
+ * (T-3542: the periods). */
+export function Schedule({ l, st, limits = NO_LIMITS, crowd = null, canAuto = true, copy, label, weekends = false, hours = false, above }: {
+  l: LineInput; st: LineStats; period: number; limits?: (Limit | null)[]; crowd?: Float64Array | null; canAuto?: boolean; copy?: ComponentChildren; label?: string; weekends?: boolean; hours?: boolean; above?: ComponentChildren;
 }) {
   const v = vehicleOf(st);
-  const auto = headwayShown(l.id);
+  const auto = rowHeadwayShown(l.id);
   const stops = l.stops.length;
+  const f = rowsFigs(st), now = rowAt(hoursOf(st), f.n, lineSeconds(st));
   // T-2661: the crowding bar in a level's hover reads west to east
   const w = world.value, flip = !!w && lineReversed(l, w, !!st.loop);
   return (
@@ -310,42 +347,44 @@ export function Schedule({ l, st, now, limits = NO_LIMITS, crowd = null, canAuto
                 [true, t("schedule.headway")],
               ]}
               value={auto !== null}
-              onChange={(on) => setAutoTrains(l.id, on)}
+              onChange={(on) => setRowAuto(l.id, on)}
             />
           </span>
         )}
       </div>
+      {above}
       <table class="sched">
         <tr>
-          <th>{t("schedule.demand")}</th>
+          <th>{f.n === 3 ? t("schedule.demand") : t("schedule.period")}</th>
+          {weekends && hours && <th>{t("schedule.hours")}</th>}
           <th>{manyCap(v)}</th>
           <th>{t("schedule.headway")}</th>
         </tr>
-        {!weekends && DEMANDS.map((d) => {
-          // T-1783: no dot on a level with no vehicles
-          const dot = st.status === "running" && (trainsShown(l.id) ?? st.trainsNeeded)[DEMAND_INDEX[d]] > 0;
+        {!weekends && f.rows.map((_, r) => {
+          // T-1783: no dot on a row with no vehicles
+          const dot = st.status === "running" && (rowTrainsShown(l.id) ?? f.settled)[r] > 0;
           const p = dot && crowd && lineFiguresIn(demandView.value, l.id, stops) ? crowd : null;
           return (
-            <tr class={d === now ? "now" : ""}>
-              <td><LevelName v={p} d={d} stops={stops} flip={flip} ends={endNames(l)} vehicle={vehicleOf(st)} pending={dot && !p && demandPending.value} /></td>
-              <LevelCells l={l} st={st} d={d} auto={auto} limits={limits} />
+            <tr class={r === now ? "now" : ""}>
+              <td><LevelName v={p} n={f.n} r={r} stops={stops} flip={flip} ends={endNames(l)} vehicle={vehicleOf(st)} pending={dot && !p && demandPending.value} hours={hoursOf(st)} /></td>
+              <LevelCells l={l} st={st} lev={r} auto={auto} limits={limits} />
             </tr>
           );
         })}
-        {weekends && <DaySections l={l} st={st} now={now} limits={limits} crowd={crowd} auto={auto} flip={flip} />}
+        {weekends && <DaySections l={l} st={st} now={now} limits={limits} crowd={crowd} auto={auto} flip={flip} hours={hours} />}
       </table>
-      {weekends && <DefaultHeadways id={l.id} auto={auto} />}
+      {weekends && <DefaultHeadways id={l.id} n={f.n} auto={rowHeadwayShown(l.id)} />}
     </>
   );
 }
 
 /** T-3543, T-3588: the headways every new line of this line's kind starts with, in the schedule panel: what they
  * are now, the button that makes this line's the default for the kind, and the way back. A bus or ferry line's
- * (T-3703) are its tool's until one is set. */
-function DefaultHeadways({ id, auto }: { id: string; auto: [number, number, number] | null }) {
+ * (T-3703) are its tool's until one is set. T-3767: one headway per row of the line's `n` (`headwaysFor`). */
+function DefaultHeadways({ id, n, auto }: { id: string; n: number; auto: readonly number[] | null }) {
   const kind = lineKind(id);
   if (!kind) return null;
-  const now = headwaysFor(kind, newHeadway.value);
+  const now = headwaysFor(kind, newHeadway.value, n);
   const same = !!auto && !!now && auto.every((s, i) => s === now[i]);
   return (
     <div class="sched-default">
@@ -361,37 +400,95 @@ function DefaultHeadways({ id, auto }: { id: string; auto: [number, number, numb
 const KIND_TITLE = { rail: "schedule.defaultTitle", tram: "schedule.defaultTitleTram", fast: "schedule.defaultTitleFast", bus: "schedule.defaultTitleBus", ferry: "schedule.defaultTitleFerry" } as const;
 
 /** T-3521: the schedule panel's table body: a Weekdays section and a Weekends section, each a row a
- * level. Today's kind of day bolds its level now, as the line panel does, and has `crowd`'s dots;
+ * row of the line's (T-3542). Today's kind of day bolds its row now (`now`), as the line panel does, and has `crowd`'s dots;
  * the other section's dots are a weekday's or a Saturday's (the boarding account's kinds 0 and 1). */
-function DaySections({ l, st, now, limits, crowd, auto, flip }: { l: LineInput; st: LineStats; now: Demand; limits: (Limit | null)[]; crowd: Float64Array | null; auto: [number, number, number] | null; flip: boolean }) {
+function DaySections({ l, st, now, limits, crowd, auto, flip, hours }: { l: LineInput; st: LineStats; now: number; limits: (Limit | null)[]; crowd: Float64Array | null; auto: readonly number[] | null; flip: boolean; hours: boolean }) {
+  const cols = hours ? 4 : 3;
   const w = world.value, stops = l.stops.length;
   const today = rowIn(lineCountry(l.stops), Math.floor(lineSeconds(st) / 86400));
   const acct = accountVersion.value;
   const other = 1 - today;
   const asked = useClockQuery(st.status === "running" ? { what: "linePeriods", line: l.num, day: other } : null, [l.num, w?.version, acct, other], (x) => (x.length ? x : null)) ?? null;
   const crowdOf = (row: number) => (row === today ? crowd : asked);
+  const f = rowsFigs(st);
+  // T-3542: the row whose typed hours left some row too short, and the hours it needs
+  const [short, setShort] = useState<{ r: number; need: number } | null>(null);
+  useEffect(() => {
+    if (!short) return;
+    const id = setTimeout(() => setShort(null), SHORT_SHOWN_MS);
+    return () => clearTimeout(id);
+  }, [short]);
   return (
     <>
       {[0, 1].map((row) => (
         <>
-          {row === 0 ? <tr class="sched-day"><th colSpan={3}>{t("schedule.weekdays")}</th></tr> : <WeekendHead l={l} />}
-          {DEMANDS.map((d) => {
-            const lev = DEMAND_INDEX[d];
-            const shown = row === 0 ? trainsShown(l.id) ?? st.trainsNeeded : weekendShown(l.id)?.counts ?? st.trainsNeeded;
-            // T-1783: no dot on a level with no vehicles that day
+          {row === 0 ? <tr class="sched-day"><th colSpan={cols}>{t("schedule.weekdays")}</th></tr> : <WeekendHead l={l} cols={cols} />}
+          {f.rows.map((_, lev) => {
+            const shown = row === 0 ? rowTrainsShown(l.id) ?? f.settled : rowWeekendShown(l.id)?.counts ?? f.settled;
+            // T-1783: no dot on a row with no vehicles that day
             const dot = st.status === "running" && shown[lev] > 0;
             const c = crowdOf(row);
             const p = dot && c && lineFiguresIn(demandView.value, l.id, stops) ? c : null;
             return (
-              <tr class={d === now && today === row ? "now" : ""}>
-                <td><LevelName v={p} d={d} stops={stops} flip={flip} ends={endNames(l)} vehicle={vehicleOf(st)} pending={dot && !p && demandPending.value} /></td>
-                {row === 0 ? <LevelCells l={l} st={st} d={d} auto={auto} limits={limits} /> : <WeekendCells l={l} st={st} d={d} auto={auto !== null} limits={limits} />}
+              <>
+              <tr class={lev === now && today === row ? "now" : ""}>
+                <td><LevelName v={p} n={f.n} r={lev} stops={stops} flip={flip} ends={endNames(l)} vehicle={vehicleOf(st)} pending={dot && !p && demandPending.value} hours={hoursOf(st)} /></td>
+                {hours && <td>{row === 0 && <HoursBox l={l} st={st} n={f.n} r={lev} onShort={(need) => setShort(need ? { r: lev, need } : null)} />}</td>}
+                {row === 0 ? <LevelCells l={l} st={st} lev={lev} auto={auto} limits={limits} /> : <WeekendCells l={l} st={st} lev={lev} auto={auto !== null} limits={limits} />}
               </tr>
+              {row === 0 && short?.r === lev && <tr class="sched-short"><td colSpan={cols} class="bad">{t(short.need > 2 ? "schedule.hoursShortHigh" : "schedule.hoursShort", { count: short.need })}</td></tr>}
+              </>
             );
           })}
         </>
       ))}
     </>
+  );
+}
+
+/** How long the hours a row's box was refused for show under it, ms. */
+const SHORT_SHOWN_MS = 5000;
+
+/** T-3542 stage 2: a row's hours in the schedule window ("6-10"; rush "6-10, 16-20"), typed in whole
+ * hours. They set the game's hours, or the line's own once it has its own periods. Hours that leave
+ * some row under two hours (a line of three rows' high under six) are refused: the box shakes and
+ * `onShort` gets the hours that row needs (0 clears it). */
+function HoursBox({ l, st, n, r, onShort }: { l: LineInput; st: LineStats; n: number; r: number; onShort: (need: number) => void }) {
+  const cuts = hoursOf(st), row = rowsOf(n)[r];
+  const text = row ? rowHoursText(cuts, row) : "";
+  const [draft, setDraft] = useState<string | null>(null);
+  const done = useRef(false), fresh = useRef(false);
+  const box = useRef<HTMLSpanElement>(null);
+  const open = (el: HTMLInputElement | null) => {
+    if (!el || !fresh.current) return;
+    fresh.current = false;
+    el.focus();
+    el.select();
+  };
+  const commit = () => {
+    if (done.current) return;
+    done.current = true;
+    const d = draft;
+    setDraft(null);
+    if (d === null || d.trim() === text) return;
+    const got = typedHours(cuts, n, r, d);
+    if (!got) return;
+    if ("short" in got) { knock(); shakeEl(box.current); onShort(got.short); return; }
+    onShort(0);
+    setHours(got.cuts, st.periodsOwn > 0 ? l.id : undefined);
+  };
+  const label = t("schedule.hoursLabel", { row: rowLabel(n, r) });
+  return (
+    <span ref={box} class="sched-hours" onAnimationEnd={() => box.current?.classList.remove("shake")}>
+      {draft === null
+        ? <button class="v typed" aria-label={t("widgets.type", { label })} onClick={() => { done.current = false; fresh.current = true; setDraft(text); }}>{text}</button>
+        : <input class="v typing" ref={open} value={draft} aria-label={label}
+          onInput={(e) => setDraft(e.currentTarget.value)} onBlur={commit}
+          onKeyDown={(e) => {
+            if (e.key === "Enter") commit();
+            if (e.key === "Escape") { done.current = true; setDraft(null); }
+          }} />}
+    </span>
   );
 }
 
@@ -454,8 +551,8 @@ export function PastDay({ l, st, periods, kind, extra }: { l: LineInput; st: Lin
     if (!pending) return null;
     return (
       <>
-        <div class="h divided">{shown !== null && <span class="pending-note muted" data-tip={t("schedule.recalculating")}>{pendingLabel(pending)}</span>}</div>
-        <ul class="rows"><Row label={t("schedule.riders")}>{shown !== null ? count(shown) : <span class="muted" data-tip={t("schedule.recalculating")}>{pendingLabel(pending)}</span>}</Row></ul>
+        <div class="h divided">{shown !== null && <span class="pending-note muted">{pendingLabel(pending)}</span>}</div>
+        <ul class="rows"><Row label={t("schedule.riders")}>{shown !== null ? count(shown) : <span class="muted">{pendingLabel(pending)}</span>}</Row></ul>
       </>
     );
   }
@@ -465,7 +562,7 @@ export function PastDay({ l, st, periods, kind, extra }: { l: LineInput; st: Lin
   // T-2392: while the riders are worked out again the old figures stay, the label above them
   return (
     <>
-      <div class="h divided">{pending && <span class="pending-note muted" data-tip={t("schedule.recalculating")}>{pendingLabel(pending)}</span>}</div>
+      <div class="h divided">{pending && <span class="pending-note muted">{pendingLabel(pending)}</span>}</div>
       <ul class="rows">
         <Row label={t("schedule.riders")}>{count(shown ?? d.riders)}</Row>
         {!pending && extra}

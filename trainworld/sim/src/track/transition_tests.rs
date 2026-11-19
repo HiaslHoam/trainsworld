@@ -25,7 +25,7 @@ fn places(w: &TrackWorld, t: f64) -> Vec<Place> {
         if x.draw > t || x.end < t {
             continue;
         }
-        let p = &w.svc.lines[x.line as usize].runs[x.run as usize].prof[x.level as usize];
+        let p = w.svc.lines[x.line as usize].prof_of(x.run as usize, x.level as usize, x.var);
         let tau = (t - x.draw).min(p.duration);
         let (s, v) = super::profile::state_at(&p.phases, tau);
         let (px, py) = w.svc.position(&w.net, x.line, x.run as usize, s);
@@ -129,7 +129,7 @@ fn edit_at(w: &mut TrackWorld, now: f64, what: &str, edit: impl FnOnce(&mut Trac
 }
 
 fn counts(w: &mut TrackWorld, id: u32, trains: [u32; 3]) {
-    let tph = w.net.line_tph[id as usize];
+    let tph = slots_to_rows(w.net.line_tph[id as usize]);
     w.apply(Op::TrainCounts { id, trains: Some(trains), tph }).unwrap();
 }
 
@@ -299,7 +299,7 @@ fn a_game_saved_while_trains_change_over_loads_the_same() {
     assert!(!w.svc.eras_of(long as usize).is_empty(), "{:?} {:?}", w.svc.eras, w.svc.lattice(&w.net, long as usize));
     let eras = w.svc.encode_eras(&w.net);
     let mut back = TrackWorld::new(super::save::decode(&super::save::encode(&w.net)).unwrap());
-    back.svc.decode_eras(&eras, true).unwrap();
+    back.svc.decode_eras(&eras, true, false, false).unwrap();
     assert_eq!(back.svc.eras, w.svc.eras);
     assert_eq!(back.svc.shifts, w.svc.shifts);
     // the same trips, to well under a second: the rates a load settles again agree to about 1e-3 s

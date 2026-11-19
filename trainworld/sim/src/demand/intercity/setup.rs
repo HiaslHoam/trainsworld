@@ -1,4 +1,5 @@
 use super::*;
+use crate::demand::api::per_period;
 
 /// T-1175: an everyday pair's home zone and activity zone (open zones).
 fn ep_zone(m: &Market, ep: &EPairOn) -> (u32, u32) {
@@ -58,7 +59,7 @@ impl IntercityApi {
     pub(super) fn need_km(&self) -> bool {
         !self.zone_fx.is_empty() || self.m.grouped
     }
-    /// `pair_km`'s column towards `dst`, into `col` by node: each one's expected fare there less the
+    /// `pair_km`'s column towards `dst`, into `col` by the station a trip starts from: each one's expected fare there less the
     /// base, perceived minutes: its fare km at the rate plus the curve's extra, times the trip's
     /// km-weighted multiplier (T-1626). `kw`: scratch.
     pub(super) fn fare_col(&self, g: &Graph, st: Strategy, dst: usize, col: &mut Vec<f32>, kw: &mut Vec<f32>, dep: &mut Vec<(u32, f32)>) {
@@ -67,9 +68,21 @@ impl IntercityApi {
         if weighed {
             trip_km_on(g, st, dst, &g.rn_kmw, kw, dep);
         }
-        for (i, v) in col.iter_mut().enumerate() {
-            let k = *v;
-            *v = (self.fare_per_km * k + g.fare_curve.extra(k)) * if weighed { fare_mul_of(k, kw[i]) } else { 1. };
+        if g.fare_curve.zones.is_empty() {
+            for (i, v) in col.iter_mut().enumerate() {
+                let k = *v;
+                *v = (self.fare_per_km * k + g.fare_curve.extra(k)) * if weighed { fare_mul_of(k, kw[i]) } else { 1. };
+            }
+        } else {
+            // T-3758: under fare zones each trip's fare follows its rides
+            ZONE_WORK.with(|zw| {
+                let mut zw = zw.borrow_mut();
+                zw.run(g, st, dst, &self.fare_km, &g.rn_kmw, dep);
+                for (i, v) in col.iter_mut().enumerate() {
+                    let k = *v;
+                    *v = self.fare_per_km * k * if weighed { fare_mul_of(k, kw[i]) } else { 1. } + if i < g.n_st { zw.extra(i) } else { 0. };
+                }
+            });
         }
         // T-3578: and the base times the trip's base multiplier less the base `FareX` adds
         if !g.rn_base_mul.is_empty() {
@@ -78,6 +91,8 @@ impl IntercityApi {
                 *v += base_extra(g, m);
             }
         }
+        // T-3718: read by the station a trip starts from
+        st.start_column(col);
     }
     /// T-1229: each served everyday pair's kind, home place, rail legs in period `q` and the
     /// walking legs those riders were taken from (the period's average over crowding rounds).
@@ -425,7 +440,10 @@ impl IntercityApi {
             })
             .collect();
         let moved = self.refresh_window(svc);
-        if moved || served != self.served || comp != self.served_comp {
+        // T-2880: the pairs read only which zones share a component, so renumbering alone keeps them
+        if !moved && served == self.served && comp != self.served_comp && same_joins(&self.served_comp, &comp) {
+            self.served_comp = comp;
+        } else if moved || served != self.served || comp != self.served_comp {
             match part.filter(|p| self.same_pairs_as(p, &served, &comp)) {
                 Some(p) => self.set_served_from(p, served, comp),
                 None => self.set_served(served, comp),
@@ -514,9 +532,10 @@ impl IntercityApi {
         for &n in line_n {
             off.push(off.last().unwrap() + n)
         }
-        if st_xy.len() % 2 != 0 || stops.len() != *off.last().unwrap() as usize || times.len() != 6 * stops.len() || tph.len() != 3 * cars.len() || cars.len() != line_n.len() || stops.iter().any(|&s| s as usize >= st_xy.len() / 2) {
+        let per = per_period(&off, times, tph);
+        let Some((times, tph)) = per.filter(|_| st_xy.len() % 2 == 0 && stops.len() == *off.last().unwrap() as usize && cars.len() == line_n.len() && stops.iter().all(|&s| (s as usize) < st_xy.len() / 2)) else {
             return Err("intercity network arrays disagree".into());
-        }
+        };
         let (st_x, st_y, st_map) = merge_stations(st_xy, &off, stops, self.base.station_merge_m);
         let group = demand_groups(&st_map, st_x.len(), &self.complex_in);
         let ups = demand_ups(&st_map, st_x.len(), &self.ups_in);
@@ -532,8 +551,8 @@ impl IntercityApi {
             line_off: off,
             stops: stops.iter().map(|&s| st_map[s as usize]).collect(),
             stop_xy: stops.iter().flat_map(|&s| [st_xy[2 * s as usize], st_xy[2 * s as usize + 1]]).collect(),
-            times: times.to_vec(),
-            tph: tph.chunks_exact(3).map(|v| [v[0], v[1], v[2]]).collect(),
+            times,
+            tph,
             cars: cars.to_vec(),
             group,
             span: span_for(&self.span_in, stops.len()),
@@ -559,4 +578,9 @@ impl IntercityApi {
         self.svc = Some(svc);
         Ok(now_ms() - t)
     }
+}
+
+thread_local! {
+    /// T-3758: `fare_col`'s scratch under fare zones.
+    static ZONE_WORK: std::cell::RefCell<ZoneWork> = std::cell::RefCell::new(ZoneWork::default());
 }

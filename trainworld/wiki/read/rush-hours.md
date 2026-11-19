@@ -10,7 +10,7 @@ A day is cut into five periods, each solved on its own.
 | Evening | 20 to 24 | medium |
 | Night | 0 to 6 | low |
 
-Your high, medium and low train settings run in those hours.
+Your high, medium and low train settings run in those hours. In a line's schedule window you can split them into four or five periods and move their hours, two hours at least, on bus and ferry lines too; the periods above stay put, so a setting that reaches into another period is averaged into it.
 
 Commutes bunch up. 70% of the day's trips to work start in the morning peak, and 58% of the trips home in the evening peak. Errands and visits spread more evenly through the day.
 
@@ -21,4 +21,4 @@ Weekends and public holidays have their own demand, with less commuting and more
 The trips themselves are in [who travels](who-travels.md).
 
 Exact rule: `docs/demand-timing.md` "Time of day". The commute shares here are commutes only. Everyday trips have a table for each purpose.
-In the code: **main** `sim/src/track/params.rs` `PERIOD_HOURS`, also `PERIOD_LEVEL`, `PEAK_HOUR_FACTOR` `sim/src/demand/api.rs` `TO_WORK`, `TO_HOME` `sim/src/demand/days.rs` `day_rate` `sim/src/demand/everyday.rs` `OUTWARD`
+In the code: **main** `sim/src/track/params.rs` `PERIOD_HOURS`, also `PERIOD_ROW`, `PEAK_HOUR_FACTOR` `sim/src/demand/api.rs` `TO_WORK`, `TO_HOME` `sim/src/demand/days.rs` `day_rate` `sim/src/demand/everyday.rs` `OUTWARD`

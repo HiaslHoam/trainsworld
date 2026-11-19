@@ -61,8 +61,14 @@ impl TrackApi {
     /// kind 13): per station, direction and faster line, `[station, faster line, wait per train s]`,
     /// flat, largest first.
     pub fn line_waits(&self, line: u32, level: usize) -> Vec<f64> {
+        self.line_waits_at(line, self.w.net.row_slot(line as usize, level.min(crate::track::params::ROWS - 1)))
+    }
+    /// T-3542: `line_waits` in demand period `period` (0-4), at the slot serving it.
+    pub fn line_waits_in(&self, line: u32, period: usize) -> Vec<f64> {
+        self.line_waits_at(line, self.w.net.period_slot()[period.min(4)])
+    }
+    fn line_waits_at(&self, line: u32, lev: usize) -> Vec<f64> {
         let cap = &self.w.svc.cap;
-        let lev = level.min(crate::track::params::LEVELS - 1);
         let mut v: Vec<[f64; 3]> = (0..cap.res.len())
             .filter_map(|r| {
                 let f = cap.wait_for(r)?;
@@ -80,6 +86,38 @@ impl TrackApi {
             .filter(|&n| net.is_station(n) && net.node_upgrades[n as usize] != 0)
             .flat_map(|n| [n, net.node_upgrades[n as usize] as u32])
             .collect()
+    }
+
+    /// T-3740: stations with a fare zone: node, code (`StationData::fare`), flat.
+    pub fn station_fares(&self) -> Vec<u32> {
+        let net = &self.w.net;
+        (0..net.node_count() as u32)
+            .filter(|&n| net.is_station(n) && net.node_fare[n as usize] != 0)
+            .flat_map(|n| [n, net.node_fare[n as usize]])
+            .collect()
+    }
+
+    /// T-3740: give stations `nodes` the fare zone codes `codes` (one each, or one for all; 0 none),
+    /// as one edit, free at constructed stations too. Nodes that are no station, and stations already
+    /// so, are left out; 1 when none is left (no edit).
+    pub fn set_station_fares(&mut self, nodes: &[u32], codes: &[u32]) -> u32 {
+        if codes.len() != nodes.len() && codes.len() != 1 {
+            return self.refuse(Issue::NoSuchNode { node: nodes.first().copied().unwrap_or(u32::MAX) });
+        }
+        let mut ops = vec![];
+        for (k, &node) in nodes.iter().enumerate() {
+            let fare = codes[if codes.len() == 1 { 0 } else { k }];
+            let Some(old) = self.w.net.station_data(node) else { continue };
+            if old.fare != fare && !ops.iter().any(|o| matches!(o, Op::Station { node: n, .. } if *n == node)) {
+                ops.push(Op::Station { node, data: Some(StationData { fare, ..old }) });
+            }
+        }
+        if ops.is_empty() {
+            self.money_short = None;
+            self.issues.clear();
+            return 1;
+        }
+        self.run(if ops.len() == 1 { ops.pop().unwrap() } else { Op::Batch(ops) })
     }
 
     /// Stations whose name the player typed (T-2683): their nodes.

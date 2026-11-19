@@ -547,7 +547,7 @@ fn rides_nest_with_walks() {
 #[test]
 fn another_station_never_makes_rail_dearer() {
     let inf = f32::INFINITY;
-    let sk = Skims { s: 3, n: 3, r: vec![0., inf, 30., inf, 0., 45., inf, inf, 0.], walk: vec![], walk_max: vec![], slot: vec![], next: vec![], board: vec![], order: vec![], change: vec![], entry: vec![] };
+    let sk = Skims { s: 3, n: 3, r: vec![0., inf, 30., inf, 0., 45., inf, inf, 0.], walk: vec![], walk_max: vec![], slot: vec![], next: vec![], board: vec![], order: vec![], change: vec![], entry: vec![], start: vec![] };
     let p = Params::default();
     let theta = p.band_unsoftened(p.n_bands() - 1);
     let list = |walks: &[(usize, f32)]| {
@@ -1470,20 +1470,6 @@ fn intercity_real_network_outputs() {
         assert!(worst < 1e-6);
     }
 }
-/// The Northeast's old single pack opens as a closed world (`bin/joint_gravity.rs` checks what it
-/// writes this way). `cargo test --release --features demand legacy_northeast_pack_opens -- --ignored`
-#[test]
-#[ignore]
-fn legacy_northeast_pack_opens() {
-    let root = concat!(env!("CARGO_MANIFEST_DIR"), "/..");
-    let text = std::fs::read_to_string(format!("{root}/data/work/intercity.json")).unwrap();
-    let t = now_ms();
-    let a = IntercityApi::new(&text).unwrap();
-    let (zones, first, keys) = market_site_zones(&text).unwrap();
-    eprintln!("{:.0} ms, info {:?}, {} sites, {} zones", now_ms() - t, a.info(), zones.len(), first.len());
-    assert_eq!(keys.len() as f64, a.info()[0]);
-    assert!(a.info()[2] > 0. && a.m.cw.commuters > 0.);
-}
 /// T-378: rail against the plane on real far pairs, one fast line between two stations (no feeders:
 /// walks and rides only), fares $1.50 + 10 cents a rail km, free flow in the busiest period.
 /// `cargo test --release --features demand real_far_lines_share_rail_with_air -- --ignored --nocapture`
@@ -1924,7 +1910,7 @@ pub(crate) fn real_world(root: &str, ids: Option<&[&str]>) -> String {
 fn regional_station_pairs_take_the_local_scale() {
     // stations 0 and 1 near the home, 2 at work: 0 -> 2 costs 30, 1 -> 2 costs 33
     let inf = f32::INFINITY;
-    let sk = Skims { s: 3, n: 3, r: vec![0., inf, 30., inf, 0., 33., inf, inf, 0.], walk: vec![], walk_max: vec![], slot: vec![], next: vec![], board: vec![], order: vec![], change: vec![], entry: vec![] };
+    let sk = Skims { s: 3, n: 3, r: vec![0., inf, 30., inf, 0., 33., inf, inf, 0.], walk: vec![], walk_max: vec![], slot: vec![], next: vec![], board: vec![], order: vec![], change: vec![], entry: vec![], start: vec![] };
     let p = Params::default();
     // a pair whose car takes 60 perceived minutes, past 12 km: the band's scale, not softened
     let th = p.soften(p.band_unsoftened(p.band_of_d2(20e3 * 20e3)), 60.);
@@ -2817,6 +2803,43 @@ fn t2878_ab() {
         assert!(rebuilt.solve_crowded(q, &total) && shared.solve_crowded(q, &total));
         let same = figures_differ(&pass_figures(&rebuilt, q), &pass_figures(&shared, q));
         eprintln!("period {q} crowded: {same}");
+        assert_eq!(same, "the same to the bit");
+    }
+}
+/// T-2880: a market part moved from the `before` network to the `after` one in place (its pairs kept
+/// when only component numbers moved) against one set up on `after` from nothing: tables and every
+/// figure to the bit. `TW_T2878_BEFORE=<net> TW_T2878_AFTER=<net> cargo test --release --features demand --lib t2880_ab -- --ignored --nocapture`
+#[test]
+#[ignore]
+fn t2880_ab() {
+    let read = |k: &str| -> serde_json::Value { serde_json::from_str(&std::fs::read_to_string(std::env::var(k).unwrap()).unwrap()).unwrap() };
+    let (before, after) = (read("TW_T2878_BEFORE"), read("TW_T2878_AFTER"));
+    let ids: Vec<String> = before["markets"].as_array().unwrap().iter().map(|v| v.as_str().unwrap().to_string()).collect();
+    let idr: Vec<&str> = ids.iter().map(|s| s.as_str()).collect();
+    let root = concat!(env!("CARGO_MANIFEST_DIR"), "/..");
+    let mut moved = IntercityApi::new(&real_world(root, Some(&idr))).unwrap();
+    moved.set_chunk(MARKET_CHUNK);
+    t2878_set(&mut moved, &before, None);
+    let old_comp = moved.served_comp.clone();
+    let ms_moved = t2878_set(&mut moved, &after, None);
+    let mut fresh = IntercityApi::new(&real_world(root, Some(&idr))).unwrap();
+    fresh.set_chunk(MARKET_CHUNK);
+    let ms_fresh = t2878_set(&mut fresh, &after, None);
+    eprintln!("in place {ms_moved:.0} ms, from nothing {ms_fresh:.0} ms; components equal {}, joined alike {}", old_comp == fresh.served_comp, super::setup::same_joins(&old_comp, &fresh.served_comp));
+    assert_eq!(moved.served, fresh.served);
+    assert_eq!(moved.served_at, fresh.served_at);
+    assert_eq!(moved.pairs.len(), fresh.pairs.len());
+    for (a, b) in moved.pairs.iter().zip(&fresh.pairs) {
+        assert!(a.a == b.a && a.b == b.b && a.trips.to_bits() == b.trips.to_bits() && a.corridor == b.corridor && a.car == b.car && a.band == b.band, "a pair differs");
+    }
+    assert_eq!(moved.cpairs.len(), fresh.cpairs.len());
+    assert_eq!(moved.epairs.len(), fresh.epairs.len());
+    assert_eq!(moved.st_pat.off, fresh.st_pat.off);
+    assert_eq!(moved.want, fresh.want);
+    for q in 0..PERIODS {
+        assert!(moved.solve(q) && fresh.solve(q));
+        let same = figures_differ(&pass_figures(&moved, q), &pass_figures(&fresh, q));
+        eprintln!("period {q}: {same}");
         assert_eq!(same, "the same to the bit");
     }
 }

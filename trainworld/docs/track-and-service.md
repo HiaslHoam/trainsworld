@@ -86,8 +86,8 @@ Full design, numbers and sources: `notes/T-008.md`.
   path): each segment drawn is one edge (each pair's, on quad track), joined to the next at a
   plain node (two edge ends, no station). A route edit given clicked corners (`pis`, as the
   real-network snap sends them, T-727; the drawing tool sends none) makes one piece per corner, cut
-  in the middle of the leg between two corners, the shape unchanged. The delete tool, Construct in the track
-  inspector and the track inspector itself act on one piece, and removing a piece leaves its
+  in the middle of the leg between two corners, the shape unchanged. The delete tool, Construct for a clicked
+  piece (in the selection bar) and the track inspector act on one piece, and removing a piece leaves its
   neighbours with track ends where it was. The joints are not drawn and cost nothing; trains pass
   them with no speed limit or delay (a track section runs on through a plain node, 6.2). A station placed
   within half a platform of joints first joins the pieces there into one edge, joint after joint
@@ -273,7 +273,7 @@ Full design, numbers and sources: `notes/T-008.md`.
   junction with nothing on one side, ways that contradict round a loop) each run takes its way by its own ends,
   and those ending at such a junction run both ways. A pre-0.4 save pins such a group whole when a station is
   on any of it. A line of a loaded save whose path runs against a way its track now takes is moved through its
-  same stops on load (`reroute_against_ways`), as an edit changing a way moves it. The track inspector's "Run trains one way" switch shows the way the piece runs, taken by itself included (hover "Set by the track it joins" then). Switched on it stores the way (the run's own, else 1), off it stores 3 where the run gives a way (pinned both ways) and 0 where it does not; "Use automatic way", shown only where the stored way differs from the run's, stores 0 again; "Reverse direction" turns it
+  same stops on load (`reroute_against_ways`), as an edit changing a way moves it. The selection bar's "Run trains one way" switch (a piece clicked is the pick, T-3746) shows the way the piece runs, taken by itself included (hover "Set by the track it joins" then). Switched on it stores the way (the run's own, else 1), off it stores 3 where the run gives a way (pinned both ways) and 0 where it does not; "Use automatic way", shown only where the stored way differs from the run's, stores 0 again; "Reverse direction" turns it
   round (`TrackApi::set_edge_oneway`, free, one undo step, 0 to 3; `edge_oneway` gives the set value,
   `edge_infer` the run's own way, `edge_way` and `oneway_edges` the way, `join_edges` the joins that count);
   it also moves the piece's joins that count to the double track that carries a set way 1 or 2
@@ -320,9 +320,17 @@ Full design, numbers and sources: `notes/T-008.md`.
   track", T-3333).
   A station's name the player typed is flagged (`StationData::named`, bit 8 of its node flags in the save,
   set by `set_station_props` when the name changes; the twin copies it): load's tidying of capitals
-  skips it, and a building's default name prefers such a member [T-2683].
-  The stations of a complex that carry no typed name show one name, the oldest's (T-3288, ui-map.md "Station
-  complexes"); `set_station_name` sets a name without the flag, for the complex's rename.
+  skips it [T-2683].
+  A station is bound to its complex's name, or unbound with a name of its own (`StationData::own`, empty while
+  bound; the `LSN1` block in the save, level 27) [T-3759]. Its stored `name` is its part in the complex's name
+  either way: the complex's name is its oldest typed name, else its oldest station's (T-3288, T-3750, ui-map.md
+  "Station complexes"). A new station starts unbound with its placed name when the game's setting is off
+  (`set_bind_new`; the quad twin copies the station beside it); unbinding (`set_station_bound`) gives it its
+  stored name to show. Saves of level 26 and older load all bound, then the app unbinds each typed station whose
+  name was not its complex's (it showed its own then; `take_old_names`, `adopt_old_names`, off the undo history).
+  A station building keeps only a name the player gave it (empty for none:
+  it then shows its complex's name, worked out in the app); saves of level 23 and older stored a copy of a
+  station's name in every building, so they load with none (T-3750).
 - **No automatic crossovers** (T-1688): nothing the player does adds a crossover by itself, not
   drawing (quad included), placing stations or doubling up. The player draws crossing track between
   the pairs where lines should change over. A line whose stops lie on two pairs with no way between
@@ -790,8 +798,11 @@ as a short crossover (ui-map.md "Single-lead crossovers", T-3161). One-way singl
 train can use (pieces pointing into each other, or away from each other, so a node's table has no
 move out of one or into another) is badged on the map (`Network::node_unusable`, T-3164). A **flyover** removes it: real one-way legs that send the crossing move over the main
 (T-3092, 6.1 "Flyovers"), or the junction inspector's flying flag, for its price (6.4). The map's
-flat-junction badge marks a junction only where two moves in its table could cross, run by a line
-or not (`capacity::junction_crosses`, T-3103). A **flat crossing** makes every move on one
+flat-junction badge marks a junction only where two moves in its table could cross
+(`capacity::junction_crosses`, T-3103), and on built track only where two moves that lines run do cross
+(`capacity::conflict_nodes`, T-3745: a line's own two directions count; a line going straight
+through without taking the branch, or two lines merging or diverging, do not), since a junction
+with no crossing pair run holds nothing. A **flat crossing** makes every move on one
 route conflict with every move on the other; one with no train on its other route (blueprint, or
 constructed track no line runs on) holds nothing. A **tram** crossing a train route at a flat
 crossing yields (T-3032): the train route's crossing resource is loaded by trains only, so tram passes
@@ -893,9 +904,18 @@ trips, trains needed, average speed and demand. It is run off as slower running 
 stretch (T-2018): one speed cap from the stretch's start to its end, the same in every hop there,
 bisected so the run takes exactly the loss longer (`profile::Hold::span`); the train never stands
 between stops for it. A loss too big even at 0.5 m/s (`FOLLOW_CRAWL_MIN_V`) waits its rest at the
-stop before the stretch. Drawn, the faster train closes on the one ahead while that one stands at
-its stations and is held behind it by the display guard ([ui-map.md](ui-map.md) "Never through the train ahead"), so
-it trails it. Worked example (20 km, a station every
+stop before the stretch. Behind the one slower line it is timetabled with, the drawn timetable times
+each faster train behind the slower train ahead of it (T-3346 stage 2, `timing::follow_one`): a train
+that never comes within `s` of it loses nothing; one that would runs slower from the node before the
+first place it would, losing just enough to keep `s` at every node of the stretch (and stands at the
+stretch's start if it reaches it too close), in at most 8 versions per slot as for waits at passing
+stations below; the averaged loss stays the figure. A train loses at most the averaged loss plus its
+stand at the far end less 60 s (`timing::TURN_MIN_S`), so it still takes its next departure (the fleet
+is sized on the averaged loss); past that it is held behind the slower train by the display guard.
+On t1965's track (8 km, a station a km, one train each): own losses 6-154 s a run against 35
+averaged. Elsewhere the faster train closes on the one ahead
+while that one stands at its stations and is held behind it by the display guard ([ui-map.md](ui-map.md)
+"Never through the train ahead"), so it trails it. Worked example (20 km, a station every
 km, 10 locals an hour, 6 expresses from the second station to the end, double track,
 `express_behind_local_takes_about_its_time`): the local takes 33.4 min one way, the express 8.0 min
 free and 29.5 min behind it. An express and a local on one double track every 3 minutes each, as
@@ -928,10 +948,26 @@ hold at that stop (`stop_holds`; `ResKind::Wait`, wire kind 13, `Resource::node`
 faster run and passing point, with no utilisation, so no map dot, and it neither fills nor caps
 track), and the faster line's remaining loss is its following loss (kind 11) for that slower line;
 behind several slower lines the largest loss counts, as above. The departures placement (6.3) puts
-the faster line's trains at that offset behind the slower one's; the two
-directions each take their own best offset, so where one phase cannot give both, the figures can be
-better than what the drawn trains do. When the headways are multiples of each other every slower trip
-waits at the same stations.
+the faster line's trains at that offset behind the slower one's. These averages are the figures: round
+trips, trains needed and demand. **The drawn timetable is worked out train by train** (T-3346 stage 2,
+`track/timing.rs`): once an edit has settled and the departures are placed, each slower train's waits
+come from the faster trains as they really run (both lines' placed departures, each direction at the
+phase it gets, `overtake::train_waits`, which takes the two lines' departures as lists), by the same
+rule and caps, so a local waits for exactly the expresses that would catch it and leaves 60 s after
+the last of them. A run keeps at most 8 versions of its timetable per slot (`timing::MAX_VARS`; waits
+rounded up to whole 2 s, and past 8 the two versions that add the least waiting merge into one whose
+waits cover both), and each weekday departure names its version by its place in the day, its stretch
+and its number in it (`Run::pattern`, into `Trip::var`; the renderer, boarding, the chart, the board and
+the train's stops read the trip's). Weekends of a line's own run the slot's timetable (the versions
+were worked out against weekday trains). A train whose own version runs longer than the slot's stands
+less at its last stop, down to 60 s (`timing::TURN_MIN_S`), so it still takes its next departure. **The
+floor**: a run whose trains on their own versions would on average stand less than that at their last
+stop (the round trip is sized on the averages, and the trains run at another phase than the plan's
+best, as the two directions of a pair can) keeps the slot's timetable for that slot, as before; so
+does a pair of lines only one of which runs its own weekends. The lie (DECISIONS 2026-11-19): riders
+choose, and fleets are sized, on the averages, so in a direction whose phase is not the plan's best the
+figures can differ from the drawn trains by the difference in waits. When the headways are multiples
+of each other every slower trip waits at the same stations.
 Worked example (180 km of high-speed track, stations every 30 km, high-speed locals at all seven and
 expresses at three, passing tracks at the five between, `passing_tracks_let_the_express_by`): free,
 49.3 and 38.6 min one way; every 10 minutes each, the express loses 8 s to overtakes (9.3 min
@@ -982,15 +1018,15 @@ at the resource's entry: a slower approach when the delay is shorter than what b
 and starting again there would cost, otherwise a stop in front of it. So trains visibly crawl or
 queue at a tangle.
 
-**Shown** on the map as a round dot on every resource at 75% and up, for the demand level in
-force; nothing shows below 75%. It is a gauge (T-1893; before it a clock face whose hand was the
+**Shown** on the map as a round dot on every resource at 75% and up, for the demand period in
+force (T-3542: its slot's); nothing shows below 75%. It is a gauge (T-1893; before it a clock face whose hand was the
 wait): a white disc with a ring whose colour runs from yellow at 75% through orange at 90% to red
 at 100%, red when over 100% or full with some line's trains waiting for room (overloaded). Inside,
 a three quarter dial and a needle at the utilisation (full scale at 100%, so lower right when full
 or over). No number on the dot (T-1772); the wait is in the hover. Hovering it shows three lines: what it is and its
 utilisation ("shared track at 81% of capacity", ">100%" when over), its trains an hour against the
-most it takes ("20/25 trains per hour"), and the wait per train at the level in force ("at high
-demand, slows trains by 1m21s"; no line without a wait). Each resource has a kind the app words by
+most it takes ("20/25 trains per hour"), and the wait per train in the period in force ("Slows
+trains by 1m21s in the morning peak", at midday, in the evening peak, in the evening, at night; no line without a wait). Each resource has a kind the app words by
 (`Capacity::wire_kind`, `game/capacityKinds.ts`, the hover's word in brackets): track, single track,
 platform, turning (kind 3, the pooled turn of 6.2, worded "Turning at Nerul Village is full"; T-3107
 folded the older kinds 6, 8, 9, 10 and 14 into it, and they are no longer made), junction, flat
@@ -1035,8 +1071,10 @@ line panel's round-trip split, waiting at busy track among it: [ui-inspectors.md
   names it as "the trains". Saved in the `LSL1` block (count, then line index and km/h), save level 13; old saves load
   with none. Bus and ferry lines ignore it.
   **A piece's speed limit** (T-3405; Anita 2026-11-15 and 2026-11-17): any piece of track but a crossover may carry
-  a limit, 40 km/h up to its kind's top speed in whole km/h (`EdgeData::limit`, 0 none, kept in range by `set_edge`;
-  `TrackApi.set_edges_limit`, free, one undoable edit, constructed or blueprint). It lowers the piece's cap
+  a limit, 40 km/h up to under its kind's top speed in whole km/h (`EdgeData::limit`, 0 none, kept in range by
+  `set_edge` through `piece_limit`: a limit at or over the top is none, T-3525, so such a piece joins unlimited track
+  and an old save's limit at the top loads as none; `TrackApi.set_edges_limit`, free, one undoable edit for any
+  number of pieces, constructed or blueprint). It lowers the piece's cap
   (`Network::v_cap`; the kind's own is `v_kind_cap`), so every train on it, the run times, headway fleets, routing
   times, the map's speed colours and the stop-time hover ("A speed limit on the track") follow; with a line's limit
   too, the lower holds. The track panel's "Slowest curve" and the curve labels stay the curves'. A split keeps it on
@@ -1115,6 +1153,19 @@ line panel's round-trip split, waiting at busy track among it: [ui-inspectors.md
   other leg, however close (T-3605, Anita 2026-11-17): it is a stop of its own (no way_group), so the stop list and
   its half dot say where trains stop, and taking one of two side by side out leaves the other served one way. Any
   number may sit on a leg, none on the other included. Half dots and the departures board show each one way.
+- **One-way stops the player sets** (T-3711, Anita 2026-11-18; `LineData::ones`, `Network::one_stop_side`,
+  `settle_ones` in `track/wasm/lines.rs`): a shift-click in the line tool makes a stop of an open rail line served one
+  way only, at any plain station through which track runs both ways (not a one-way station, which is one already,
+  nor one with its platform on one track). It is served once a round trip as a one-way station is (routing, passes,
+  half dots, departures), by the run arriving by the side it keeps (its port side); the other run passes through it
+  without stopping or keeps to other track. Its way is the one that makes sense: of the two, the one whose line turns
+  back fewer times over both runs; on a tie the way it had, or for one just set, the way the line goes there in its
+  stop list. Every stop edit weighs it again (a side kept leaves the edit's own route), so a stop set before the
+  station on the other leg is added turns to the other way once that station is a stop. Unlike a one-way station its place in the stop list comes from the
+  clicks, as any other stop's. A stop at an end, or of a loop, is served as any stop while it is one. Shift-clicked
+  again, it is served both ways. Taken out, it loses the setting. Saved in `LOS1`. The case: legs that split and
+  join again with one leg two-way (a bypass joined to the far track, notes/T-3672.md), where a line listing both
+  side platforms otherwise stops at the two-way one both ways and zigzags.
 
 #### Line groups
 
@@ -1236,7 +1287,24 @@ line panel's round-trip split, waiting at busy track among it: [ui-inspectors.md
 - **Scheduling** (T-104, Anita): every line sets a whole number of trains on the entire line,
   both directions together, for **high, medium and low demand** (the column header is "Demand").
   High runs 6-20 (the morning peak, midday and evening peak), medium 20-24, low 0-6
-  (`PERIOD_LEVEL`; Anita, 2026-10-27, T-1536) on every kind of day. **Weekends** (T-3521, from
+  (`PERIOD_ROW`; Anita, 2026-10-27, T-1536) on every kind of day. The track side keeps its figures
+  per period (`SLOTS`, slot = period, T-3542); a row's periods share its first period's slot
+  (`Network::period_slot`), so only three are worked out. **Hours** (T-3542 stage 2, Anita
+  2026-11-17): the five hours a line's day splits at (`params::Cuts`, 6, 10, 16, 20 and 24 at first)
+  are the game's, or a line's own once it has its own periods (it keeps the game's hours as its own
+  then; "Same as game" drops both). Whole hours, each stretch two hours at least (high on a line of
+  three rows holds three stretches, so six), the evening may run past midnight. Demand's periods
+  never move: a row reaching into another period is **averaged into that period's slot**
+  (`Network::mixed`, `Mix`): the slot runs the time-weighted rate of its rows (the settle counts each
+  row's trains for its share of the slot's hours), each row's piece of it leaves at the row's own
+  rate there (the slot's shared out by what each row's trains run, `place_tph`), departures break
+  at the line's hours and at the period bounds (`service::Hours`, `day_stretches`), and demand reads
+  the rate of the mean headway the period's riders meet, riders arriving by the period's shape and
+  those in a piece with no trains left to the span (`Service::demand_tph`). A row's borrowed hours
+  run no more often than the row does in a slot of its own (`running_borrowed`), a mixed slot is
+  not paced at merges, and the lead and the overtake sweep's longest headway are capped at half and
+  all of the line's shortest row (2 h and 4 h at the default hours, so those games run as before).
+  Weekends keep the same hours. **Weekends** (T-3521, from
   GabrielMoraez's PR 13; `LineData::weekend`): Saturday and Sunday (a country's own weekend) and
   public holidays run a line's weekend trains; a superholiday's days and the weekend days a country
   works run its weekday ones (`rowOfIn` in `game/holidayCalendar.ts`, sent per line as
@@ -1280,7 +1348,10 @@ line panel's round-trip split, waiting at busy track among it: [ui-inspectors.md
   has not moved stays in its set, and a set that ran one pace keeps it while every line can run it
   and it is within 0.5% of the new one. The move a pacing makes in the paced lines' own round trips
   counts as part of that pacing, not as a move. Without this London's 130 lines at one merge paced each
-  other back and forth on every edit. A load takes the saved pacing and its sets as they are. A headway line there counts with its
+  other back and forth on every edit. A load takes the saved pacing and its sets as they are. On weekends the same
+  pacing runs on the weekend counts and service (T-3584: inside `settle_weekend`, from the weekdays'
+  pacing at first; kept beside `svc_rest`, not saved, worked out again at the first edit after a load), so
+  lines sharing track are paced from their weekend headways. A headway line there counts with its
   set headway and is never moved. Where a merge is full (98%, `PACE_FULL_RHO`) its count lines share
   it evenly: each that could run more often keeps the even share of their trains an hour together
   (a line left at its own headway counts at the rate it now runs, so the share is the same on every
@@ -1472,8 +1543,8 @@ money: it pays, and the cash may go below zero (the cash is not shown; docs/ui-p
   | US$M a km in a -2 tunnel (1.6) | 120 | 120 | 120 | 120 |
 
   The classes come from GEDTM30 (OpenGeoHub's bare-earth terrain model at 30 m, CC BY 4.0, T-1854)
-  by `pipeline/zone_terrain.py` from the intermediate in `data/work/terrain-fine/`
-  (`terrain_fine.py`): the mean slope of the 30 m pixels over each cell of a world lattice of 1/960
+  by `pipeline/world_terrain.py` (with `zone_terrain.py`'s classes) from the intermediate in
+  `data/work/terrain-fine-world/` (`terrain_fine.py`): the mean slope of the 30 m pixels over each cell of a world lattice of 1/960
   degree (about 115 m north-south), classed, a 3 x 3 majority filter (drops single-cell specks, keeps
   a valley floor two cells wide), then capped at the class of the ground around it: the slope between
   the 1/240 degree mean elevations, about 920 m apart (second row), taken bilinearly at the cell's
@@ -1694,9 +1765,11 @@ money: it pays, and the cash may go below zero (the cash is not shown; docs/ui-p
 #### Fares and the ledgers
 
 - Running costs, upkeep and **fares**
-  are settled by the clock worker into the cash and a ledger per day (every day kept, T-2143) and per hour (48
+  are settled by the clock worker into the cash and a ledger per day (every day kept, T-2143; once a ledger spans more
+  than 90 weeks, its days older than 120 fold into one entry per calendar month, where the History chart groups by month
+  anyway, T-3757, `workers/ledgerFold.ts`) and per hour (48
   kept, T-447) as the game runs, not once an hour (T-284). The ledgers hold one entry per day or
-  hour, in order; a day runs midnight to midnight in the start zone's local time, an hour is the
+  hour (or folded month, keyed by its earliest day), in order; a day runs midnight to midnight in the start zone's local time, an hour is the
   clock's ([world.md](world.md) "Local time", T-2271); a load merges any day or hour an older save lists twice. Money time never goes
   back: a clock set behind the time already settled adds nothing until it passes it, and a charge
   meanwhile lands on the latest day. Both threads time the clock on `performance.timeOrigin +
@@ -1725,8 +1798,10 @@ money: it pays, and the cash may go below zero (the cash is not shown; docs/ui-p
   and this hour's ledger four times a wall second while the clock runs; the top bar shows the cash to the dollar,
   and only it and the Money tab's cash, Today column and History re-render. The fare for a trip
   follows one curve of trip length for the network, set in the Money tab [T-883, T-1112, T-1143,
-  `app/src/game/fareCurve.ts`]: straight stretches through the player's three nodes, carried on
-  past the last at its slope. The first node is the base fare at 0 km; each later one is farther and
+  `app/src/game/fareCurve.ts`]: straight stretches through the player's nodes, carried on
+  past the last at its slope: three in the Money tab, 1 to `MAX_NODES` 12 set in the Advanced fares panel
+  (T-3739; one node is a flat fare, a step is two nodes 0.1 km apart, `NODE_GAP_KM`). The first node is the
+  base fare at 0 km; each later one is farther and
   never cheaper, so no fare is below the base or falls with distance, and none (nor the transfer fare)
 is over `FARE_MAX`, curve US$1,000 (T-3303: a typed 90 billion once went into every money sum;
 `tidyNodes` holds it, so a loaded save is held too). **Fares by country**
@@ -1771,16 +1846,29 @@ is over `FARE_MAX`, curve US$1,000 (T-3303: a typed 90 billion once went into ev
   A save from before T-1521, or one with no nodes, takes its base and rate from its tidied (rounded)
   nodes as it loads, the same as the slot writes next, so its first reload's network is every later one's
   and the demand cache hits on it (`loadFares`, T-2559).
-  An older save's two nodes, or a base and rate, load as the three nodes on their line (one below
-  $0 at 0 km starting at $0 instead), any other curve as the line through its first and last node.
+  A save keeps its nodes as set, 1 to 12 (no other field; an older build loads a count other than
+  three as the line through its first and last node). A save from before T-1521 with two nodes, or a
+  base and rate, loads as the three nodes on their line (one below $0 at 0 km starting at $0 instead),
+  any other count as the line through its first and last node (`simpleNodes`).
   The curve's fares are kept to a hundredth of a cent, so a fare typed where the scale is not 1
-  reads back as typed. A trip that changes lines pays it once on its whole length, at the scale of
-  the country it starts in: each zone's populations get the curve times their country's scale, and
-  the regional market the curve itself. Fare income takes each stretch at its starting stop's
-  country's scale and the base at the boarding stop's (`stopScales`, game/money.ts), and so does
-  the split between regions. In
+  reads back as typed. A trip that changes lines pays it once on its whole length. Riders weigh it at
+  their own country's scale (each zone's populations get the curve times their country's scale, the
+  regional market the curve itself), but **income charges every ride by the stops it uses**: the
+  base at the stop it boards at, each stretch at the scale of the stop it leaves (`stopFareScales`,
+  game/money.ts, from `countryFareScales`, game/fareDefault.ts), and so does the split between regions.
+  The curve extra and base extra each population's trips add come back in its own dollars (a zone's at
+  its country's scale, the market's in the curve's) and are converted to the same rule, each route
+  node's at the scale of the stop it leaves (`DemandNetwork` `fareS` and `baseS`, the demand worker's
+  `sumAll`; T-3748, T-3753), so a transfer fare is charged at the scale of the stop where the rider
+  changes, and income is the curve times the stop's scale on every ride, a cross-border one too. Two
+  approximations are left (DECISIONS 2026-11-19, T-3753): a base extra (a line's own multiple, T-3578)
+  spread over a line's later stretches pays the stop each leaves, not the boarding stop; and a
+  country on its rounded default fares charges trips other than its own zones' the curve times its
+  rounded first stretch's ratios, not its rounded curve. In
   demand, route search charges the first stretch as a base and a rate per km on each ride
-  (`set_fares`), and each station pair's cost adds what the rest of the curve adds at the expected
+  (`set_fares`; T-3739: a first stretch shorter than 10 km charges no more a km than the curve's average
+  over its first 10 km, `firstStretch`, so a step 0.1 km out does not price every long ride at the step's
+  slope; what riders pay is still the curve, the pair's extra making up the difference), and each station pair's cost adds what the rest of the curve adds at the expected
   km of its strategy (the riders' split over lines by their departures; `set_fare_curve`,
   `kernel::trip_km`). The assignment puts that extra, the trips times the curve's extra at their
   pair's km, on the stretches they ride, each by its km, split as they split (`Loads::rn_fare_x`,
@@ -1800,14 +1888,37 @@ is over `FARE_MAX`, curve US$1,000 (T-3303: a typed 90 billion once went into ev
   `baseTrips`; docs/demand-worldwide.md).
   A quad-track twin carries its line's; a deleted line's is kept in hand, not saved, until an undo brings the line
   back or a new line takes its id [T-3581] (the clock's `tidyLineFares`). So a trip pays base x M + (curve(km) - base) x
-  (1 + (m - 1) x its share of km on high-speed lines), M its lines' largest own multiple. Demand takes it as each route node's
+  (1 + (m - 1) x its share of km on high-speed lines), M its lines' largest own multiple.
+  **Fare zones** [T-3740, `game/fareZones.ts`]: a station may carry a fare area and zone number (`StationData::fare`,
+  area id << 8 | zone 1-255, saved in `LFZ1`, an undoable edit); the areas and their prices (one per zone count,
+  1 to `MAX_ZONES` 12, the last for any more, never falling, held to `FARE_MAX`, and as charged never below the base)
+  are `Fares.zones` in the header, with `zoneNext` so no area id is used twice. Each line (rail, bus or ferry) is set
+  to zone fares, the default, or the distance fare [T-3758] (`LineData::fare_dist`, saved in `LFD1`, an undoable
+  edit a copy keeps; the line panel's Fares row, shown only once the game has an area). A ride on a zone line whose
+  boarding and alighting stations are in one area is a zone ride; zone rides one after another in one area
+  (changes between them allowed) are a run, paying that area's price for the zones from the lowest to the highest
+  of its stations the rides stop at or pass (2 -> 1 -> 2 is 2 zones; stations without a zone between count
+  nothing). Every other ride, one to or from a bus stop that is no station included, is a distance ride. A trip pays
+  base x M + (curve(distance rides' km) - base) x their multiplier + the sum over its runs of (price - base) x each
+  run's multiplier, a zone, distance, zone trip paying two runs (`kernel::ZoneWork`; exact on a single route, where
+  riders split onto runs in one area their lowest and highest zones are averaged before pricing). A change between two
+  rides of one run pays no transfer fare [T-3784, Anita 2026-11-19]; every other change (to or from a distance ride,
+  or between two runs) pays it. Route cost, mode choice, income and the trip explorer take it off; route choice
+  inside the network still weighs it, as it weighs only the straight line and never the zone prices (DECISIONS
+  2026-11-19). Income puts each
+  trip's run part on its zone rides and its distance part on its distance rides, by weighted km. Prices are curve
+  units: a city's populations take them times their country's rate multiple (`countryFareScales`), the market as set.
+  The player sets them with the Fare zones tool and the Advanced fares panel
+  ([ui-panels.md](ui-panels.md#advanced-fares), notes/T-3740.md). An area's name, its next id and an area no station
+  is in reach no demand input, so naming or making one recalculates no trips.
+  Demand takes it as each route node's
   multiplier (`set_fare_mul`, `Graph::rn_fare_mul`): ride edges charge their rate times it, a
   station pair's curve extra is times the strategy's expected high-speed-weighted km over its km,
   and the assignment spreads the extra over each km times its multiplier; the market's income
   groups weigh the same fares (`IntercityApi::fare_col`). Fare income takes the rate times it on
   that line's passenger-km. **Transfer fare** [T-1801]: `Fares.transfer` (curve units, absent for
   $0, saved in the header; an older save loads with none) is paid on each boarding after a trip's
-  first, never above the base fare (T-3689: `transferFare` holds it at read, and a lowered base, a typed fare and a
+  first except a change inside a fare zone run (above), never above the base fare (T-3689: `transferFare` holds it at read, and a lowered base, a typed fare and a
   loaded save bring the stored one down; a base of 0 leaves none), times the trip's country's scale, in route choice and mode choice (docs/demand-mode.md)
   and in fare income on the line boarded after the change (`fare_extra`, so inside `LineDemand.fareX`);
   the regional market's trips change free. Fare income is the first stretch's base on
@@ -2146,11 +2257,12 @@ demand level), trips, the boarding account and the fare curve; a bus is one 12 m
   15 seats, so crowding is counted and shown as a train's (`BUS_CRUSH`, demand's `BUS_CARS`); the
   boarding account keeps no platform crowd at its stops that are no station.
 - **Street speeds**: a zone's pack gives its cells' people and jobs, the zone of each cell and the zones'
-  squares and land, which the clock worker fetches as ranges of the `.bin` with the zone's mask (and
-  for the zones a bus route is drawn or loaded in) and `TrackApi::add_pack_streets` turns into a grid of
-  the car's local street speed per zone. A game's load waits for the zones under its bus routes, so its
-  network comes from the save alone and a reload finds its demand cache (T-2499); otherwise nothing waits
-  for them, bus lines are timed again when one lands. Not saved, carried over a load like the terrain.
+  squares and land, which the clock worker fetches as ranges of the `.bin` with the masks of the view and
+  of edits (and for the zones a bus route is drawn or loaded in) and `TrackApi::add_pack_streets` turns into
+  a grid of the car's local street speed per zone. A game's load fetches only the zones under its bus routes
+  (not every zone its track meets, T-3686) and waits for them, so its network comes from the save alone and
+  a reload finds its demand cache (T-2499); otherwise nothing waits for them, bus lines are timed again when
+  one lands. Not saved, carried over a load like the terrain.
   Every Range fetch takes the bytes it asked for whether the answer is a 206, the whole file or a 200
   holding the range alone (`workers/rangeFetch.ts`; Chrome's cache gives the last while the pack
   downloads whole for demand).

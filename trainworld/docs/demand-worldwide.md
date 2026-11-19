@@ -709,7 +709,8 @@ notes/T-420.md has the tables.
   line's fares go below 0. Which line's multiple set a trip's base is not traced; the pool's network-wide
   shares stand in, as for the base itself.
   Ferry lines take the player's Ferry multiplier and bus lines the Bus multiplier (T-3028) the same way (default 1.00, T-2195; "Ferries as lines" below).
-  **Transfer fare** (T-1801): the player's, $0 by default, paid on each change of line, times the
+  **Transfer fare** (T-1801): the player's, $0 by default, paid on each change of line except one
+  inside a fare zone run (T-3784), times the
   country's scale and weighed at its `fare_w` like the curve; the regional market changes free. At
   $0 it is a free change everywhere; a player who sets one models a system that charges each
   boarding.
@@ -1000,6 +1001,10 @@ notes/T-420.md has the tables.
 
 - **Station merge and walking transfer distances** (100 m merge, 300 m walks). Fine for US
   stations; very large hubs (Shinjuku, Châtelet) have transfers over much longer underground walks.
+  A trip may start with the same walk it may end with (to a station within 300 m or of its
+  complex, at a walking transfer's cost, no change minutes or transfer fare; T-3718, Anita
+  2026-11-18: "let trips start with walk"), so a commute's way home (its station pair reversed)
+  can take its way out backwards, walk included, without a change its choice never saw.
 - **Complexes as transfer points** (T-161, with the player's links, T-197). Any two stations of a
   complex are a walking transfer however far apart, costed like every walk between stations:
   the distance between the platforms' centres (snapshot stations; within one demand station too,

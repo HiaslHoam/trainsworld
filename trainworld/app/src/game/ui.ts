@@ -116,8 +116,12 @@ export interface DisplaySettings {
   /** T-3480: a bus route drives a one-way street only the way it runs (map/busRoads.ts, map/roadGraph.ts); off, any
    * street runs both ways. Renkon's change (open-source PR 1). */
   busOneWay: boolean;
+  /** T-3759: new stations start bound to their complex's name (game/stationBinding.ts), in every game */
+  bindNew: boolean;
   /** T-3268: the plus and minus buttons at the map's right edge (ui/ZoomButtons.tsx) */
   zoomButtons: boolean;
+  /** T-3765: the top bar's pause, 1x, 4x and custom-speed buttons instead of pause, slower, speed and faster (ui/TopBar.tsx `Speed`) */
+  legacyTime: boolean;
   /** T-2660: the timetable chart draws other lines' trains where they share its track or cross it */
   chartOtherLines: boolean;
   /** T-2838, T-3630: trips between cities are calculated (the market opens); per browser, since it is about the
@@ -174,7 +178,9 @@ const DEFAULT_DISPLAY: DisplaySettings = {
   hillshade: true,
   rotateMap: false,
   zoomButtons: true,
+  legacyTime: false,
   busOneWay: false,
+  bindNew: true,
   chartOtherLines: true,
   intercityTrips: !mobileDevice(),
   modeShapes: { ...MODE_SHAPES },
@@ -278,8 +284,8 @@ export const mapShade = computed<Shade>(() => (display.value.satellite && (shade
 effect(() => setBubbleShade(mapShade.value));
 
 /** What a click on the map does: select (pick), draw track, place a station, add stops to a line,
- * remove what is clicked (T-096), pick a trip's two ends (T-195). */
-export type Tool = "select" | "track" | "station" | "line" | "delete" | "trip" | "blueprint" | "bus" | "ferry" | "building";
+ * remove what is clicked (T-096), pick a trip's two ends (T-195), give stations a fare zone (T-3740). */
+export type Tool = "select" | "track" | "station" | "line" | "delete" | "trip" | "blueprint" | "bus" | "ferry" | "building" | "fares";
 export const tool = signal<Tool>("select");
 /** T-1207: the map's camera is moving (set by map/overlay.ts); live counts in panels wait for it. */
 export const cameraMoving = { now: false };

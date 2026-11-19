@@ -257,7 +257,7 @@ pub fn stop_deps(ls: &LineSvc, lat: &Lattice, r: usize) -> Vec<Vec<f64>> {
     lattice_deps_local(lat, r, DAY, 2.0 * DAY, &mut first);
     (0..ls.stops.len())
         .map(|k| {
-            let mut deps: Vec<f64> = first.iter().map(|&(d, lev, _)| (d + ls.runs[r].prof[lev as usize].dep.get(k).copied().unwrap_or(0.0)).rem_euclid(DAY)).collect();
+            let mut deps: Vec<f64> = first.iter().map(|&(d, lev, _, _)| (d + ls.runs[r].prof[lev as usize].dep.get(k).copied().unwrap_or(0.0)).rem_euclid(DAY)).collect();
             deps.sort_by(f64::total_cmp);
             deps
         })
@@ -291,17 +291,19 @@ pub fn span_key(ls: &LineSvc, lat: &Lattice) -> u64 {
         }
     };
     add(ls.stops.len() as u64);
-    for lev in 0..LEVELS {
+    for lev in 0..SLOTS {
         add(lat.tph[lev].to_bits() as u64);
         add(lat.off[lev].to_bits());
         add(lat.phase[lev].to_bits());
     }
     add(lat.lead.to_bits());
+    // T-3542: moved hours (nothing at the default hours, so their keys stay as they were)
+    for v in lat.hours.words() { add(v); }
     for r in 0..2 {
         for (k, _) in ls.runs[r].pass.iter().enumerate().filter(|x| *x.1) {
             add(k as u64 | 1 << 40);
         }
-        for lev in 0..LEVELS {
+        for lev in 0..SLOTS {
             for &v in ls.runs[r].prof[lev].dep.iter() {
                 add(v.to_bits());
             }

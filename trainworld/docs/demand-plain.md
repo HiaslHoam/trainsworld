@@ -139,6 +139,9 @@ counted in the totals, by no mode. Car ferries don't count as roads.
   left to go back the way they came: on a full line people wait at their station. Where a line
   comes back through a station (a loop on a stalk), people may change there onto the same line
   heading somewhere else, like any change.
+- A trip can start or end with a walk from its station to another within 300 m (or anywhere in
+  its complex), counted like a change's walk but with no fixed 2 minutes and no transfer fare. So
+  a trip home can take the way out backwards, walk included, without an extra change.
 - If the train is full when it arrives, the wait for one with room counts too, minute for minute,
   up to an hour.
 - No more riders than the trains take: once the rest is worked out, everyone who would ride if
@@ -167,7 +170,7 @@ counted in the totals, by no mode. Car ferries don't count as roads.
   the dearer fare. Each line also has its own fare multiple (0 to 3, 1 to start) that works the same way
   on its km and scales the base too: a trip pays the base times the highest multiple among the lines it
   rides, so one at 1.5 and one at 2 pays twice the base. A transfer fare the player sets ($0 to start) is paid at each change of line,
-  times the country's scale too; people weigh it when picking a route and the train, and the line
+  except a change between two zone rides in one fare area, which is free, times the country's scale too; people weigh it when picking a route and the train, and the line
   they change onto takes it. Trips between regions change free. At the default scales a fare weighs the same
   everywhere; poorer countries just pay less per ride. A new game's curve is about what real trains
   charge: in New York $1.50 plus $0.10 a km to 20 km, then $0.25 a km, so $3.50 at 20 km, $23.50

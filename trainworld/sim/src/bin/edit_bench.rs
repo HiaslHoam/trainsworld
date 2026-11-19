@@ -17,6 +17,57 @@ fn trains(a: &TrackApi, line: u32) -> [f64; 3] {
     info.chunks(22).find(|c| c[0] as u32 == line).map_or([0.0; 3], |c| [c[13], c[14], c[15]])
 }
 
+/// T-3542: figures to compare two builds to the bit: per line `line_summary`, the running cost per
+/// hour at each level of both kinds of day, and every trip drawn over a weekday and a Saturday with
+/// its train's position halfway (profile index cut to line and run, `TW_STRIDE` profiles a run).
+fn figures(a: &TrackApi, lines: &[u32]) -> String {
+    let stride: u32 = std::env::var("TW_STRIDE").ok().and_then(|s| s.parse().ok()).unwrap_or(a.profile_slots());
+    let slot_of = |k: u32| if stride == 3 { k } else { [0, 0, 0, 1, 2][k as usize] };
+    let mut s = String::new();
+    for &l in lines {
+        s += &format!("summary {l} {:?}\n", a.line_summary(l));
+    }
+    s += &format!("running {:?}\n", (0..6).map(|k| a.running_cost(k)).collect::<Vec<_>>());
+    // T-3542: the readouts that take or give a row (`TW_ROWS=1`; master's API may lack some)
+    if std::env::var("TW_ROWS").is_ok() {
+        for r in 0..3 {
+            s += &format!("markers {r} {:?}\nfull {r} {:?}\n", a.markers(r), a.full_track(r));
+        }
+        s += &format!("upkeep {:?}\n", a.line_upkeep(&[14.0, 4.0, 6.0]));
+        for &l in lines {
+            s += &format!("held {l} {:?}\nrest {l} {:?}\nweekend {l} {:?}\n", a.line_held(l), a.line_tph_rest(l), a.line_weekend(l));
+            for r in 0..3 {
+                s += &format!("delays {l} {r} {:?}\nwaits {l} {r} {:?}\n", a.line_delays(l, r), a.line_waits(l, r));
+            }
+            for &n in a.line_stops(l).iter() {
+                s += &format!("junction {n} {:?}\n", a.junction_info(n));
+            }
+        }
+    }
+    // T-3542: what demand reads per period (`TW_DEMAND=1`; the slots' rates and the riders' mean)
+    if std::env::var("TW_DEMAND").is_ok() {
+        for &l in lines {
+            s += &format!("period {l} {:?}\ndemand {l} {:?}\nhours {l} {:?}\n", a.line_tph_by_period(l), a.line_demand_tph(l), a.line_hours(l));
+        }
+    }
+    let meta = a.profile_meta();
+    for day in [2.0, 6.0] {
+        for h in 0..24 {
+            let epoch = day * 86400.0 + h as f64 * 3600.0;
+            for t in a.trips(epoch).chunks(4) {
+                let p = t[0] as u32;
+                // T-3346 stage 2: each slot's variants under it (a trip of a timed line prints its slot)
+                let q = p / a.profile_vars();
+                let (line, run, lev) = (q / (2 * stride), (q / stride) % 2, q % stride);
+                let (draw, end) = (epoch + t[1] as f64, epoch + t[2] as f64);
+                let at = a.train_at(line, run as usize, lev as usize, draw, (draw + end) / 2.0);
+                s += &format!("trip {line} {run} {} {:?} {:?} {:?}\n", slot_of(lev), &t[1..], &meta[p as usize * 4 + 1..p as usize * 4 + 4], at);
+            }
+        }
+    }
+    s
+}
+
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let bytes = std::fs::read(&args[0]).expect("track bytes");
@@ -49,6 +100,9 @@ fn main() {
     };
     if let Ok(path) = std::env::var("TW_DUMP") {
         std::fs::write(&path, format!("{:?}\n", a.lines_info())).unwrap();
+        // T-3542: the save bytes after the load and after the edits, to compare two builds' saves
+        std::fs::write(format!("{path}.save"), a.save()).unwrap();
+        std::fs::write(format!("{path}.figs"), figures(&a, &lines)).unwrap();
     }
     // T-1924: per line after the load, tab-separated: id, name, km, then per level (high, medium,
     // low) trains an hour, round trip s, delay s and trains, to compare two builds' run times
@@ -69,6 +123,55 @@ fn main() {
         let sum = |row: u32| -> Vec<f32> { (0..3).map(|lev| lines.iter().map(|&l| a.line_tph_on(l, row, lev)).sum()).collect() };
         eprintln!("trains an hour, all lines: weekdays {:?}, weekends {:?}", sum(0), sum(1));
     }
+    // T-3542: `TW_PERIODS=<3|4|5>` sets the game's rows first (timed, not in the mean, the clock
+    // left as it is), so every line runs that many; `TW_PERIODS_BACK=1` sets three again after it
+    if let Some(p) = std::env::var("TW_PERIODS").ok().and_then(|s| s.parse::<u32>().ok()) {
+        let t = Instant::now();
+        let r = a.set_game_periods(p);
+        eprintln!("periods {p} (game) {:.1} ms r={r}, slots {:?}", t.elapsed().as_secs_f64() * 1e3, a.period_slots());
+        if std::env::var("TW_PERIODS_BACK").is_ok() {
+            let t = Instant::now();
+            let r = a.set_game_periods(3);
+            eprintln!("periods 3 (game) {:.1} ms r={r}, slots {:?}", t.elapsed().as_secs_f64() * 1e3, a.period_slots());
+        }
+    }
+    // `TW_PERIODS_LINE=<4|5>`: the busiest line alone sets that many rows, the rest three
+    if let Some(p) = std::env::var("TW_PERIODS_LINE").ok().and_then(|s| s.parse::<u32>().ok()) {
+        let t = Instant::now();
+        let r = a.set_line_periods(best, p);
+        eprintln!("periods {p} (line {best}) {:.1} ms r={r}, slots {:?}", t.elapsed().as_secs_f64() * 1e3, a.period_slots());
+    }
+    // T-3542: `TW_HOURS=<five hours>` sets the game's hours (timed, not in the mean);
+    // `TW_HOURS_LINE=<five hours>` the busiest line's own, on five rows of its own
+    let cuts = |v: &str| -> Vec<u32> { v.split(',').map(|x| x.trim().parse().unwrap()).collect() };
+    if let Ok(v) = std::env::var("TW_HOURS") {
+        let t = Instant::now();
+        let r = a.set_game_hours(cuts(&v));
+        eprintln!("hours {v} (game) {:.1} ms r={r}", t.elapsed().as_secs_f64() * 1e3);
+    }
+    if let Ok(v) = std::env::var("TW_HOURS_LINE") {
+        a.set_line_periods(best, 5);
+        let t = Instant::now();
+        let r = a.set_line_hours(best, cuts(&v));
+        eprintln!("hours {v} (line {best}) {:.1} ms r={r}", t.elapsed().as_secs_f64() * 1e3);
+    }
+    // T-3542: `TW_HOURS_CHECK=<from h>,<to h>`: per line, departures from its first stop in that local
+    // hour and in 7-8, a weekday, where the first are more (a borrowed hour outrunning the peak)
+    if let Ok(v) = std::env::var("TW_HOURS_CHECK") {
+        let h = cuts(&v);
+        let (mut more, mut seen) = (0, 0);
+        for &l in &lines {
+            let Some(&stop) = a.line_stops(l).first() else { continue };
+            let n = |from: f64, to: f64| { let s = a.line_shift(l); a.station_departures(l, stop, 3.0 * 86400.0 + from * 3600.0 - s, 3.0 * 86400.0 + to * 3600.0 - s).len() / 3 };
+            let (x, peak) = (n(h[0] as f64, h[1] as f64), n(7.0, 8.0));
+            seen += 1;
+            if x > peak {
+                more += 1;
+                eprintln!("line {l} {}: {x} departures {}-{} against {peak} in 7-8", a.line_name(l), h[0], h[1]);
+            }
+        }
+        eprintln!("hours check: {more} of {seen} lines leave more often in {}-{} than in 7-8", h[0], h[1]);
+    }
     let mut all = vec![];
     all.push(time(&mut a, "headway 300/600/1200", &|a| a.set_auto_headway(best, 300, 600, 1200)));
     for i in 0..reps {
@@ -81,14 +184,33 @@ fn main() {
         all.push(time(&mut a, &format!("trains 20/{n}/4"), &|a| a.set_train_counts(best, 20, n, 4)));
     }
     all.push(time(&mut a, "undo", &|a| a.undo()));
+    // T-3542: with more than three rows, one row's trains alone (the first: rush or morning)
+    if a.game_periods() > 3 {
+        let mut one = vec![];
+        for i in 0..reps as u32 {
+            let mut t = a.line_row_trains(best);
+            t[0] += 1 + i;
+            one.push(time(&mut a, &format!("first row {}", t[0]), &|a| a.set_line_row_trains(best, t.clone())));
+        }
+        eprintln!("first row edits {}: mean {:.1} ms", one.len(), one.iter().sum::<f64>() / one.len() as f64);
+    }
     if let Ok(path) = std::env::var("TW_DUMP") {
         std::fs::write(format!("{path}.end"), format!("{:?}\n", a.lines_info())).unwrap();
+        std::fs::write(format!("{path}.end.save"), a.save()).unwrap();
+        std::fs::write(format!("{path}.end.figs"), figures(&a, &lines)).unwrap();
         // saved and loaded again (T-1787): the same figures, to the bit
         let mut b = TrackApi::new(-73.985, 40.758, true);
         let t = Instant::now();
         assert!(b.load(&a.save()), "not a save");
         eprintln!("reload {:.0} ms", t.elapsed().as_secs_f64() * 1e3);
         std::fs::write(format!("{path}.reload"), format!("{:?}\n", b.lines_info())).unwrap();
+        // T-3542: and its save and figures, the same as `.end.save` and `.end.figs`
+        if std::env::var("TW_RELOAD_FIGS").is_ok() {
+            b.set_unlimited(true);
+            b.set_now(now);
+            std::fs::write(format!("{path}.reload.save"), b.save()).unwrap();
+            std::fs::write(format!("{path}.reload.figs"), figures(&b, &lines)).unwrap();
+        }
     }
     let mean = all.iter().sum::<f64>() / all.len() as f64;
     let mut s = all.clone();

@@ -32,6 +32,7 @@ import { Money } from "./MoneyText";
 import { gameSeconds, playedText } from "../game/gameTime";
 import { NewGameSheet } from "./NewGame";
 import { t, tDate, tList } from "../i18n";
+import { openFailText } from "../game/openFailures";
 import { tPlace } from "../i18n/places";
 
 /** The saves panel is open. */
@@ -89,6 +90,7 @@ export function SlotThumb({ slot }: { slot: SaveSlot }) {
 export function SlotFacts({ slot, now, autosaved, mark, unsaved }: { slot: SaveSlot; now: number; autosaved?: boolean; mark?: ComponentChildren; /** T-3257: a viewed network, never saved */ unsaved?: boolean }) {
   const when = savedWhen(slot.at, now, !!autosaved);
   const cities = cityList(slot.cities ?? []), played = slot.key ? gameSeconds(slot.key) : undefined;
+  const failed = slot.key ? openFailText(slot.key) : null;
   // T-3610: a record the browser could not read has no time or day, only the damaged line below
   if (slot.unreadable) return <div class="small bad save-damaged">{t("clockWorker.saveDamaged")}</div>;
   return <>
@@ -108,9 +110,11 @@ export function SlotFacts({ slot, now, autosaved, mark, unsaved }: { slot: SaveS
       </>}
     </div>}
     {!!slot.stations && <div class={"small num " + (overBudget(slot.stations) ? "memory-bad" : "muted")} data-tip={t("savesPanel.memoryTip", { gb: gbText(estimateGB(slot.stations)) })}>{t("savesPanel.memory", { gb: gbText(estimateGB(slot.stations)) })}</div>}
-    {/* T-3395: the account refused this copy as damaged, or it failed to load as damaged */}
+    {/* T-3395: the account refused this copy as damaged, or it failed to load as damaged; T-3773: or why it last
+        failed to open here */}
     {slot.cloud?.error === WHY_DAMAGED ? <div class="small bad save-damaged">{whyText(WHY_DAMAGED)}</div>
-      : slot.damaged ? <div class="small bad save-damaged">{t("clockWorker.saveDamaged")}</div> : null}
+      : slot.damaged ? <div class="small bad save-damaged">{t("clockWorker.saveDamaged")}</div>
+      : failed ? <div class="small bad save-damaged save-open-failed">{failed}</div> : null}
   </>;
 }
 
@@ -329,10 +333,7 @@ export function VersionsLine({ group, now, act, children }: { group: GameGroup; 
             {deletable && <button class="btn icon save-delete" data-tip={t("savesPanel.delete")} aria-label={t("savesPanel.deleteVersionLabel")} onClick={() => setAsking(id)}><Icon.bin /></button>}
             <button class="btn text save-version-open" onClick={() => void run(act.open(v))}>{lastGood ? t("savesPanel.openCopy") : t("savesPanel.open")}</button>
           </div>
-          {asking === id && <div class="callout bad">
-            <p>{t("savesPanel.deleteVersionQuestion", { where })}</p>
-            <div class="pane-foot"><button class="btn text danger" onClick={() => { setAsking(null); void run(act.remove(v)); }}>{t("savesPanel.deleteVersion")}</button><button class="btn text" onClick={() => setAsking(null)}>{t("savesPanel.keepIt")}</button></div>
-          </div>}
+          {asking === id && <VersionDeleteAsk v={v} where={where} onYes={() => { setAsking(null); void run(act.remove(v)); }} onKeep={() => setAsking(null)} />}
         </li>;
       })}
     </ul>}
@@ -343,19 +344,41 @@ export function VersionsLine({ group, now, act, children }: { group: GameGroup; 
 /** T-2784: from this many stations up, deleting a game asks for the count to be typed. */
 const TYPE_TO_DELETE = 100;
 
-/** The delete question with its two buttons (T-2784: a big game also asks for its station count). Shared by this panel and the start menu. */
+/** A version's station count where it is known (a slot, an account game, a slot backup). */
+const stationsOf = (v: Version): number | undefined => v.kind === "slot" ? v.slot.stations : v.kind === "account" ? v.game.facts?.stations : v.kind === "backup" ? v.backup.stations : undefined;
+
+/** The count a typed confirm asks for: the most stations on any version the delete removes. */
+function biggestStations(group: GameGroup): number | undefined {
+  const all = [group.top, ...group.others].map(stationsOf).filter((n): n is number => n !== undefined);
+  return all.length ? Math.max(...all) : undefined;
+}
+
+/** The delete question with its two buttons (T-2784: a big game also asks for its station count; T-3787: the biggest version's). Shared by this panel and the start menu. */
 export function DeleteAsk({ group, playing = false, yesLabel, keepLabel, yesClass = "", onYes, onKeep }: { group: GameGroup; playing?: boolean; yesLabel: string; keepLabel: string; yesClass?: string; onYes: () => void; onKeep: () => void }) {
-  const top = group.top;
-  const stations = top.kind === "slot" ? top.slot.stations : top.game.facts?.stations;
+  const stations = biggestStations(group);
   const [typed, setTyped] = useState("");
   const gate = stations !== undefined && stations >= TYPE_TO_DELETE;
   const ok = !gate || typed.trim() === String(stations);
   return <>
     <p>{deleteGroupQuestion(group, playing)}</p>
-    {gate && <label class="delete-type"><span>{t("savesPanel.typeToDelete", { count: stations })}</span>
+    {gate && <label class="delete-type"><span>{t(group.others.length ? "savesPanel.typeToDeleteBiggest" : "savesPanel.typeToDelete", { count: stations })}</span>
       <input type="text" inputMode="numeric" value={typed} autocomplete="off" onInput={(e) => setTyped((e.target as HTMLInputElement).value)} /></label>}
     <div class="pane-foot"><button class={"btn text danger " + yesClass} disabled={!ok} onClick={onYes}>{yesLabel}</button><button class="btn text" onClick={onKeep}>{keepLabel}</button></div>
   </>;
+}
+
+/** The question under one other-version row; a version with TYPE_TO_DELETE stations or more asks for its count. */
+function VersionDeleteAsk({ v, where, onYes, onKeep }: { v: Version; where: string; onYes: () => void; onKeep: () => void }) {
+  const stations = stationsOf(v);
+  const [typed, setTyped] = useState("");
+  const gate = stations !== undefined && stations >= TYPE_TO_DELETE;
+  const ok = !gate || typed.trim() === String(stations);
+  return <div class="callout bad">
+    <p>{t("savesPanel.deleteVersionQuestion", { where })}</p>
+    {gate && <label class="delete-type"><span>{t("savesPanel.typeToDeleteVersion", { count: stations })}</span>
+      <input type="text" inputMode="numeric" value={typed} autocomplete="off" onInput={(e) => setTyped((e.target as HTMLInputElement).value)} /></label>}
+    <div class="pane-foot"><button class="btn text danger" disabled={!ok} onClick={onYes}>{t("savesPanel.deleteVersion")}</button><button class="btn text" onClick={onKeep}>{t("savesPanel.keepIt")}</button></div>
+  </div>;
 }
 
 /** The question before a card's game is deleted with every version (T-2037); also the start menu's. */

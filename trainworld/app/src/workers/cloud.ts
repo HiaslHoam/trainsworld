@@ -3,7 +3,7 @@
 // they follow the player to other devices. Each slot's tie is its `SyncRecord` (`sync:<slot>`).
 //
 // Plain functions of a `CloudContext`, so both threads use them: the clock worker uploads after each
-// write and claims the game it opens (clock.worker.ts); the main thread settles every slot on the
+// write and claims the game it opens (slots.ts); the main thread settles every slot on the
 // start menu before the worker starts, and downloads or deletes the account's other games.
 
 import { t } from "../i18n";
@@ -372,9 +372,10 @@ export async function stampAll(list: AccountList | null): Promise<void> {
   await stampOrigins(new Map(fresh.map((s) => [s.key, origins.get(s.cloud?.id || s.key)!])), names);
 }
 
-/** A record for a slot first written while signed in: tied to the account. */
+/** A record for a slot first written while signed in: tied to the account. Always a new id: the page's score entry for
+ * this key (`ctx.ids`) is that of an earlier game in a reused slot, the original `autosave` (T-3720). */
 export async function tieNew(ctx: CloudContext, key: string): Promise<SyncRecord> {
-  const rec: SyncRecord = { id: ctx.ids?.[key] || newGameId(), acct: ctx.acct, rev: 0, syncedAt: 0 };
+  const rec: SyncRecord = { id: newGameId(), acct: ctx.acct, rev: 0, syncedAt: 0 };
   await writeSync(key, rec);
   return rec;
 }

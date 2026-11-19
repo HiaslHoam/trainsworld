@@ -119,7 +119,15 @@ Web first, so it can be shared as a link.
   clock pass it, anything else runs it first. Meanwhile the client holds every other read until no
   stop click has been answered for 500 ms (the panels ask a dozen after each world). The clicked marker is drawn
   in its new tier at the click (`StopMarkers.guessClick`, settled when the edit is answered) and a rows world
-  rebuilds no demand layers (`worldIsRows`) [T-3159]. A state carries only the edges,
+  rebuilds no demand layers (`worldIsRows`) [T-3159]. **A name edit's rows go first too** (`nameOnly`: a station,
+  complex or line renamed, a station bound): rows, then the answer, then the full state at once, unheld and with no
+  trips, since the network drawn has no names and no train's run changed [T-3793]. The clicks wait in the page in order (`queueStopEdit` in
+  game/world.ts), each holding its line and game stamp from the click: stop editing ending sends them all (the busy
+  tag says "Saving stops" meanwhile) and only a game loaded since drops one, on the page or, for one sent before the
+  page heard of the load, in the worker (T-3734); an undo or redo, a save, leaving the game
+  and a reload wait for them (closing the tab does not: Anita, 2026-11-18) [T-3731]. The line panel's own
+  stop edits (a row's remove, a dot click, a drag, Add, Shift-click end) join the same queue, each naming its
+  stops by station and visit and resolving them against the list the one before left [T-3732]. A state carries only the edges,
   nodes and lines that differ from the last one posted, with the ids in order when they changed
   (`delta`, T-1029); the client rebuilds the full lists from its last ones before anything reads it.
   The worker itself reads from the track model only the rows an edit changed: it keeps the last
@@ -385,7 +393,8 @@ Web first, so it can be shared as a link.
   whose memory is at least 384 MB and 15% above its need is restarted through the panic path above,
   together and without counting as a panic; the network is solved once more, questions wait for that
   final, and a worker is not restarted again until its memory or need has moved by 384 MB. Before
-  each solve the pool drops solving workers while 0.6 GB for the page, each worker's need plus 0.15 GB
+  each solve the pool drops solving workers while the page outside the workers' WASM (at least 0.6 GB, and as
+  the live memory reading counts it, `liveMemory.ts`: about 5 GB on a 7,000-station game, T-3757), each worker's need plus 0.15 GB
   for its JS heap (or, on a cross-origin isolated page, `measureUserAgentSpecificMemory`'s measure of
   everything outside the WASM) would pass `memBudget`: 8 GB (Anita's target, T-1199), the device's
   memory (`deviceGB`) x 0.75 under 8, 6 GB where it is not reported; or while the solving workers
@@ -549,10 +558,17 @@ all results are recomputed. Sizes: notes/T-040.md, notes/T-567.md.
   named after the file without `.save` and written at once; a restored backup's (this browser's or
   the account's) takes the name of the game it backs up and is a version of that game (T-2037,
   "Versions of one game" below). A tab without its slot's lock must make a copy before leaving a changed
-  game. On a test page the game is replaced in the page and owns no slot. A slot that cannot be
-  read on start stays as it is (its bytes also under `unreadable-<time>:<slot>`, deleted with the slot) and the new game gets a
-  slot of its own ("Game N"), with no sync record, so nothing of it is uploaded over the account's
-  copy; one that fails as damaged is marked so ("Damaged saves" below). The start menu's New game always takes a new slot, even with nothing
+  game. On a test page the game is replaced in the page and owns no slot. **A game that fails to open goes
+  back to the start menu** [T-3773]: a saved game (Saved games, an account game, the slot resumed at page
+  load), a file, a backup or a viewed network whose load throws in the clock worker (damaged, a panic, a
+  failed allocation). The worker lets go of every slot (`letGoSlot`, the "noLease" write block, as a start
+  that failed, T-2703), starts no game, and sends `openFailed`; the page records it and reloads to the menu,
+  so nothing is written to any slot and nothing goes up to the account. The slot stays as it is (its bytes also
+  under `unreadable-<time>:<slot>`, deleted with the slot); one that fails as damaged is marked so ("Damaged
+  saves" below). The record, `localStorage` `tw-open-failures` (`game/openFailures.ts`: a count and the last
+  10 failures, each with slot, name, what was opened, the reason and the build), gives the menu its notice
+  (once) and the saved game's card its reason until that slot opens, and is there for feedback reports (T-3774). A
+  real network's new game that fails still starts empty in its new slot. The start menu's New game always takes a new slot, even with nothing
   saved (T-728); the original slot `autosave` is only ever an old one.
 - **Real networks** [T-731]: `packs/real/<id>.save` for New York, London, Paris, Tokyo, Seoul,
   Toronto and Sendai, made by hand from timetables, and [T-3225] the cities in `pipeline/realauto.json`
@@ -644,7 +660,8 @@ all results are recomputed. Sizes: notes/T-040.md, notes/T-567.md.
   deletion from the account taking off an unchanged copy, `settleSlot`) deletes it, its backups,
   sync record and demand cache. A card's delete deletes every slot and account game of its origin
   (T-2037); one version is deleted from the card's list of other versions. T-1827 had kept deleted slots 30 days under `deleted:<ms>-<id>`;
-  Anita removed it the same day, and `sweepDeleted` clears any such keys at every start.
+  Anita removed it the same day, and `sweepDeleted` clears any such keys at every start. On the account,
+  the server keeps a deleted game 7 days for an admin restore under a new id (T-3789); the browser never sees it.
 - **Storage full or cleared while open** [T-1829]: a connection the browser closes (site data
   cleared, the database deleted from another page: `close` and `versionchange`) is forgotten, and
   every call that fails to open a transaction drops the connection and tries once more, so the
@@ -695,7 +712,8 @@ all results are recomputed. Sizes: notes/T-040.md, notes/T-567.md.
   renumbers ids. Its key is a SHA-256 of the network demand reads, of every pack the solve covered
   (the packs open as it was sent, one closed while it ran included, T-2579) and of the market, the app build, the worker count and the perfOff flags; the zones must be the
   ones the new solve covers. A load's network is worked out from the save alone (it waits for the
-  bus routes' street speeds, [track-and-service.md](track-and-service.md) 6.7, T-2499), so a reload
+  bus routes' street speeds, [track-and-service.md](track-and-service.md) 6.7, T-2499; the clock worker sends no state
+  or snapshot between a load's start and the loaded game's, T-3686), so a reload
   of an unchanged game finds the result its last final wrote. When a whole game loads and the key matches, the result shows at once
   (the bubbles once the zone's cells are open), and once the network is in the loading card goes
   and the clock runs (T-2560). The workers solve the
@@ -795,7 +813,7 @@ all results are recomputed. Sizes: notes/T-040.md, notes/T-567.md.
   id made per page load and held in memory only, a second random id kept in localStorage
   (`trainworld.browser`, never tied to the account) so the server counts distinct browsers and each one's
   days and minutes (Anita, 2026-11-06; forgotten after 13 months unseen), the zone the game began in
-  (`gameStartZone`), sandbox or not, the build; signed in, the session rides along like every call, so the server counts minutes per
+  (`gameStartZone`), the focused zone now (`activeCity`; the server counts minutes per city by it, T-3382), sandbox or not, the build; signed in, the session rides along like every call, so the server counts minutes per
   account. The server keeps per-UTC-day aggregates, never the IP; `GET /trainworld/stats` needs the admin key.
   Nothing is sent with `notrack` in localStorage (the website's owner opt-out; `?notrack` sets it,
   `?track` clears it), on localhost or from an automated browser (smoke, screenshots) unless the address

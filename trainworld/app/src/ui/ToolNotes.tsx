@@ -34,7 +34,10 @@ function Ask() {
   useLayoutEffect(() => { if (q) cancel.current?.focus(); }, [q]);
   if (!q) return null;
   return (
-    <dialog class="confirmation" ref={dialog} aria-labelledby="confirmation-title" aria-describedby="confirmation-text" onCancel={() => { ask.value = null; q.stay?.(); }} onKeyDown={e => {
+    <dialog class="confirmation" ref={dialog} aria-labelledby="confirmation-title" aria-describedby="confirmation-text" onCancel={() => { ask.value = null; q.stay?.(); }} onClick={(e) => {
+      const r = e.currentTarget.getBoundingClientRect();
+      if (e.clientX < r.left || e.clientX > r.right || e.clientY < r.top || e.clientY > r.bottom) { ask.value = null; q.stay?.(); }
+    }} onKeyDown={e => {
       e.stopPropagation();
       if (e.key !== "Tab") return;
       const buttons = [...e.currentTarget.querySelectorAll<HTMLButtonElement>("button:not(:disabled)")];
@@ -89,6 +92,7 @@ function Notice() {
     : tl === "trip" && sel?.kind === "trip" && !sel.to ? t("toolNotes.tripEnd", { touch })
     : tl === "line" ? t("toolNotes.lineHint", { touch })
     : tl === "trip" ? t("toolNotes.tripHint", { touch })
+    : tl === "fares" ? t("toolNotes.fareHint", { touch })
     : "";
   const show = n && performance.now() - n.at < NOTICE_MS;
   // T-1464: the bus line tool: which line, how many points, and the way to finish (also on touch)
@@ -102,7 +106,7 @@ function Notice() {
   // T-2284: what a click does now, first, by the mode's colour; the simple modes' words and a cross to leave
   const mode = clickMode.value;
   const linkFrom = linking.value;
-  const simple = mode === "passage" ? t("toolNotes.passage", { name: (linkFrom !== null && world.value && stationsById(world.value).get(linkFrom)?.name) || t("toolNotes.aStation") }) : SIMPLE.has(mode) ? t("toolNotes.simple", { mode }) : undefined;
+  const simple = mode === "passage" ? t("toolNotes.passage", { name: (linkFrom !== null && world.value && stationsById(world.value).get(linkFrom)?.name) || t("toolNotes.aStation") }) : SIMPLE.has(mode) ? t("toolNotes.simple", { mode }) : mode === "fares" ? t("toolNotes.fareZones") : undefined;
   if (!show && !hint && !bus && !ferry && !building && !simple) return null;
   // stop editing (T-233): which line, how many stops, and the way out
   const editing = tl === "line" && draft.line !== null && world.value ? linesByNum(world.value).get(draft.line) : undefined;

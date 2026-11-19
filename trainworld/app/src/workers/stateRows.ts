@@ -17,6 +17,8 @@
 import type { TrackApi } from "../wasm/track/sim";
 import type { ClockEdge, ClockLine, ClockNode } from "./protocol";
 import type { Complexes } from "../game/complexes";
+import { nameSource } from "../game/complexLead";
+import { META_PER_LINE, PROFILES_PER_LINE } from "../map/profiles";
 
 /** what the model answers for "every one" in `take_changed_lines` and `take_name_changes` */
 const ALL = 0xffffffff;
@@ -25,7 +27,8 @@ export interface RowEnv {
   /** world metres to longitude and latitude */
   lngLat(x: number, y: number): [number, number];
   /** hours of each demand level in a day, for `line_upkeep` */
-  levelHours: Float64Array;
+  /** hours a day in each demand period (T-3542) */
+  periodHours: Float64Array;
   /** a bus line's row, and the nodes for its stops that are no station (`nodes` is the list so far) */
   busRow(a: TrackApi, id: number, nodes: ClockNode[]): NonNullable<ClockLine["bus"]>;
   /** a station's platform line, the same array while unchanged (T-1859, workers/platformLines.ts) */
@@ -64,6 +67,7 @@ interface Heavy {
   reversals: number[];
   endTurns: number[];
   ways: number[];
+  oneStops: number[];
   /** T-2895: the player set its stop order by hand (`TrackApi::line_hand`) */
   hand: boolean;
 }
@@ -92,6 +96,7 @@ interface LineRead {
   loopKind: number;
   oneWay: boolean;
   limit: number;
+  fareDist: boolean;
   weekend: number[];
   restTph: number[];
   shift: number;
@@ -100,6 +105,22 @@ interface LineRead {
   /** T-3333: `line_pairs`, `line_twin_of` */
   pairs: number;
   twinOf: number;
+  /** T-3542 */
+  tphP: number[];
+  periods: number;
+  periodsOwn: number;
+  hours: number[];
+  hoursOwn: boolean;
+  rows: ClockLine["rows"];
+}
+
+/** T-3542: a line's trains an hour per period and its rows; for four or five rows, its figures per row. */
+function periodsOf(a: TrackApi, id: number): Pick<LineRead, "tphP" | "periods" | "periodsOwn" | "hours" | "hoursOwn" | "rows"> {
+  const periods = a.line_period_count(id), periodsOwn = a.line_periods_own(id), tphP = Array.from(a.line_tph_by_period(id));
+  const hours = Array.from(a.line_hours(id)), hoursOwn = a.line_hours_own(id).length > 0;
+  if (periods <= 3) return { tphP, periods, periodsOwn, hours, hoursOwn, rows: undefined };
+  const auto = a.line_row_headways(id);
+  return { tphP, periods, periodsOwn, hours, hoursOwn, rows: { figs: Array.from(a.line_rows(id)), set: Array.from(a.line_row_trains(id)), ...(auto.length ? { auto: Array.from(auto) } : {}), weekend: Array.from(a.line_row_weekend(id)) } };
 }
 
 export function upgradesOf(a: TrackApi): Map<number, number> {
@@ -133,8 +154,19 @@ export class StateRows {
   private edgeRows = new Map<number, ClockEdge>();
   private nodeRows = new Map<number, ClockNode>();
   /** T-3288: the rows shown with a complex's name, by station (`foldNames`) */
-  private folded = new Map<number, { from: ClockNode; name: string; row: ClockNode }>();
+  private folded = new Map<number, { from: ClockNode; name: string; hub: string | undefined; row: ClockNode }>();
+  /** T-3750: each station's complex's name (`nameSource`), for the station buildings nobody named */
+  private complexNames = new Map<number, string>();
   private names = new Map<number, string>();
+  /** T-3759: each unbound station's own name, read once per change */
+  private owns = new Map<number, string>();
+  /** T-3759: each station's complex's name source (`nameSource`), by station, as the last rows read it */
+  private heads = new Map<number, number>();
+  /** T-3759: how many stations each station's complex has, as the last rows read it */
+  private sizes = new Map<number, number>();
+  /** T-3759: typed bound stations whose stored name is not their complex's, as the last rows read them
+   * (an older save's, `takeOldNames`) */
+  private apart: number[] = [];
   private lineKept = new Map<number, LineKept>();
   /** each line's phase tables (`line_phases`), by id, and all of them laid end to end as `phases`
    * answers (T-1540): the same array until a line's tables change */
@@ -159,7 +191,12 @@ export class StateRows {
     this.edgeRows.clear();
     this.nodeRows.clear();
     this.folded.clear();
+    this.complexNames.clear();
     this.names.clear();
+    this.owns.clear();
+    this.heads.clear();
+    this.sizes.clear();
+    this.apart = [];
     this.lineKept.clear();
     this.phaseTables.clear();
     this.phaseAll = null;
@@ -186,8 +223,18 @@ export class StateRows {
   /** Take the model's name changes into the kept names. Called before any name is looked up. */
   private syncNames(a: TrackApi) {
     const changed = a.take_name_changes();
-    if (changed.length && changed[0] === ALL) this.names.clear();
-    else for (const id of changed) this.names.delete(id);
+    if (changed.length && changed[0] === ALL) { this.names.clear(); this.owns.clear(); }
+    else for (const id of changed) { this.names.delete(id); this.owns.delete(id); }
+  }
+
+  /** T-3759: a station's own name, "" while bound: kept, read once per change. */
+  private own(a: TrackApi, id: number): string {
+    let n = this.owns.get(id);
+    if (n === undefined) {
+      n = a.station_own(id);
+      this.owns.set(id, n);
+    }
+    return n;
   }
 
   /** A station's name: kept, read once per change. */
@@ -253,10 +300,14 @@ export class StateRows {
     const ni = a.nodes_info();
     const offStations = new Set<number>(a.off_stations());
     const namedStations = new Set<number>(a.named_stations());
+    const unbound = new Set<number>(a.unbound_stations());
     // T-3332: one-track stations, 1 on double track, 2 on single
     const ot = a.one_track_stations(), ones = new Map<number, 1 | 2>();
     for (let k = 0; k + 1 < ot.length; k += 2) ones.set(ot[k], ot[k + 1] as 1 | 2);
     const onePlatforms = new Set<number>(a.one_platform_stations());
+    // T-3740: the stations' fare zones (none in most games)
+    const fz = a.station_fares(), fares = new Map<number, number>();
+    for (let k = 0; k + 1 < fz.length; k += 2) fares.set(fz[k], fz[k + 1]);
     const out: ClockNode[] = [];
     const kept = this.nodeRows;
     const seen = new Set<number>();
@@ -267,18 +318,20 @@ export class StateRows {
       const unusable = ((ni[i + 6] >> 2) & 3) as 0 | 1 | 2 | 3;
       const name = platform > 0 ? this.name(a, id) : "";
       const named = platform > 0 && namedStations.has(id);
+      const own = platform > 0 && unbound.has(id) ? this.own(a, id) : "";
       // T-2194: a port has no track, so no platform line
       const port = platform > 0 && a.is_port(id);
       const kind = a.node_kind(id) >= 2 ? a.node_kind(id) : 0;
       const onePlatform = onePlatforms.has(id), one = ones.get(id) ?? 0, oneHeading = one === 1 ? a.station_one_heading(id) : undefined;
       const line = platform > 0 && !port ? env.platformLine?.(a, id, ni[i + 1], ni[i + 2], platform) : undefined;
+      const fare = fares.get(id) ?? 0;
       let r = kept.get(id);
       if (!r || r.x !== ni[i + 1] || r.y !== ni[i + 2] || r.level !== ni[i + 3] || r.ports !== ni[i + 4] || r.builtPorts !== ni[i + 5] || r.flying !== flying || !!r.crosses !== crosses || (r.unusable ?? 0) !== unusable || r.platform !== platform
-        || r.stationBuilt !== stationBuilt || r.stationOff !== stationOff || r.upgrades !== upgrades || r.name !== name || !!r.named !== named || !Object.is(r.heading, ni[i + 9]) || r.line !== line || !!r.port !== port || (r.kind ?? 0) !== kind
-        || (r.one ?? 0) !== one || r.oneHeading !== oneHeading || !!r.onePlatform !== onePlatform) {
+        || r.stationBuilt !== stationBuilt || r.stationOff !== stationOff || r.upgrades !== upgrades || r.name !== name || !!r.named !== named || (r.own ?? "") !== own || !Object.is(r.heading, ni[i + 9]) || r.line !== line || !!r.port !== port || (r.kind ?? 0) !== kind
+        || (r.one ?? 0) !== one || r.oneHeading !== oneHeading || !!r.onePlatform !== onePlatform || (r.fare ?? 0) !== fare) {
         const [lng, lat] = env.lngLat(ni[i + 1], ni[i + 2]);
         const berth = port ? a.port_berth(id) : null;
-        r = { id, x: ni[i + 1], y: ni[i + 2], lng, lat, level: ni[i + 3], ports: ni[i + 4], builtPorts: ni[i + 5], flying, ...(crosses ? { crosses: true as const } : {}), ...(unusable ? { unusable } : {}), platform, stationBuilt, stationOff, upgrades, name, heading: ni[i + 9], ...(named ? { named: true as const } : {}), ...(line ? { line } : {}), ...(kind ? { kind } : {}),
+        r = { id, x: ni[i + 1], y: ni[i + 2], lng, lat, level: ni[i + 3], ports: ni[i + 4], builtPorts: ni[i + 5], flying, ...(crosses ? { crosses: true as const } : {}), ...(unusable ? { unusable } : {}), platform, stationBuilt, stationOff, upgrades, ...(fare ? { fare } : {}), name, heading: ni[i + 9], ...(named ? { named: true as const } : {}), ...(own ? { own } : {}), ...(line ? { line } : {}), ...(kind ? { kind } : {}),
           ...(one ? { one } : {}), ...(oneHeading !== undefined ? { oneHeading } : {}), ...(onePlatform ? { onePlatform: true as const } : {}),
           ...(berth && berth.length === 2 ? { port: env.lngLat(berth[0], berth[1]) } : {}) };
         kept.set(id, r);
@@ -289,42 +342,89 @@ export class StateRows {
     if (kept.size !== seen.size) for (const id of kept.keys()) if (!seen.has(id)) kept.delete(id);
     // a station no longer there keeps no name
     if (this.names.size > seen.size) for (const id of this.names.keys()) if (!seen.has(id)) this.names.delete(id);
-    if (env.complexes) this.foldNames(out, env.complexes);
+    this.foldNames(out, env.complexes);
     return out;
   }
 
-  /** T-3288: the name a station of a complex shows, where it is not its own: the stations nobody
-   * typed a name for take the name of the oldest of them. The model keeps every station's own name;
-   * a split complex gives each part's stations theirs back. The replaced rows are kept, so an
-   * unchanged one is the same object as before. */
-  private foldNames(out: ClockNode[], complexesOf: NonNullable<RowEnv["complexes"]>) {
+  /** T-3288, T-3750, T-3759: the name each station shows (`ClockNode.name`): an unbound one its own,
+   * a bound one its complex's (`nameSource`: the oldest typed name, else the oldest station's, over
+   * every member, bound or not). The model keeps every station's stored name, its part in the complex's;
+   * a split complex gives each part's stations theirs back. The replaced rows are kept, so an unchanged
+   * one is the same object as before. */
+  private foldNames(out: ClockNode[], complexesOf: RowEnv["complexes"]) {
     const stations = out.filter((r) => r.platform > 0 && !r.port);
-    const cx = complexesOf(stations);
-    const source = new Map<number, ClockNode>();
-    for (const r of stations) {
+    const cx = complexesOf?.(stations);
+    const groups = new Map<number, ClockNode[]>();
+    if (cx) for (const r of stations) {
       const c = cx.of.get(String(r.id));
-      if (c === undefined || r.named) continue;
-      const s = source.get(c);
-      if (!s || r.id < s.id) source.set(c, r);
+      if (c === undefined) continue;
+      const g = groups.get(c);
+      if (g) g.push(r);
+      else groups.set(c, [r]);
+    }
+    const source = new Map<number, ClockNode>();
+    this.complexNames.clear();
+    this.heads.clear();
+    this.sizes.clear();
+    this.apart = [];
+    for (const [c, g] of groups) {
+      const s = nameSource(g, (r) => r.id, (r) => !!r.named)!;
+      // a station alone is its own complex: the complex is called what the station shows
+      if (g.length === 1) {
+        this.complexNames.set(s.id, s.own || s.name);
+        this.heads.set(s.id, s.id);
+        this.sizes.set(s.id, 1);
+        continue;
+      }
+      source.set(c, s);
+      for (const r of g) {
+        this.complexNames.set(r.id, s.name);
+        this.heads.set(r.id, s.id);
+        this.sizes.set(r.id, g.length);
+        if (r.named && !r.own && r !== s && r.name !== s.name) this.apart.push(r.id);
+      }
     }
     const seen = new Set<number>();
     for (let k = 0; k < out.length; k++) {
       const r = out[k];
-      if (r.platform <= 0 || r.port || r.named) continue;
-      const c = cx.of.get(String(r.id));
-      const s = c === undefined ? undefined : source.get(c);
-      if (!s || s.name === r.name) continue;
+      if (r.platform <= 0 || r.port) continue;
+      const c = cx?.of.get(String(r.id));
+      const complex = c === undefined ? undefined : source.get(c)?.name;
+      const name = r.own || complex || r.name;
+      const hub = complex !== undefined && complex !== name ? complex : undefined;
+      if (name === r.name && hub === undefined) continue;
       let f = this.folded.get(r.id);
-      if (!f || f.from !== r || f.name !== s.name) this.folded.set(r.id, (f = { from: r, name: s.name, row: { ...r, name: s.name } }));
+      if (!f || f.from !== r || f.name !== name || f.hub !== hub) this.folded.set(r.id, (f = { from: r, name, hub, row: { ...r, name, ...(hub !== undefined ? { hub } : {}) } }));
       seen.add(r.id);
       out[k] = f.row;
     }
     if (this.folded.size !== seen.size) for (const id of this.folded.keys()) if (!seen.has(id)) this.folded.delete(id);
   }
 
-  /** The name a station of a complex shows when that is not its own (`foldNames`), if it does. */
+  /** The name a station shows when that is not its stored one (`foldNames`), if it does. */
   shownName(id: number): string | undefined {
     return this.folded.get(id)?.name;
+  }
+
+  /** T-3759: the station whose stored name is its complex's (`nameSource`), as the last rows read it. */
+  headOf(id: number): number | undefined {
+    return this.heads.get(id);
+  }
+
+  /** T-3759: how many stations the complex of station `id` has, as the last rows read it (0: none known). */
+  complexSize(id: number): number {
+    return this.sizes.get(id) ?? 0;
+  }
+
+  /** T-3759: the typed stations that are bound but whose stored name is not their complex's, as the last
+   * rows read them: an older save's, which showed their own names (`TrackApi.adopt_old_names`). */
+  oldApart(): number[] {
+    return this.apart;
+  }
+
+  /** The name of the complex station `id` is in (`nameSource`), as the last rows read it. */
+  complexName(id: number): string | undefined {
+    return this.complexNames.get(id);
   }
 
   /** `nodes` must have been read just before, for the bus stops that join it. A planned line's build
@@ -334,7 +434,7 @@ export class StateRows {
     const all = changed.length > 0 && changed[0] === ALL;
     const dirty = new Set<number>(all ? [] : changed);
     const li = a.lines_info();
-    const lu = a.line_upkeep(env.levelHours), upkeepOf = new Map<number, number>();
+    const lu = a.line_upkeep_periods(env.periodHours), upkeepOf = new Map<number, number>();
     for (let k = 0; k + 1 < lu.length; k += 2) upkeepOf.set(lu[k], lu[k + 1]);
     const kept = this.lineKept;
     const seen = new Set<number>();
@@ -351,17 +451,19 @@ export class StateRows {
       read.push({
         i, id, ok, running, bus, prev, fresh,
         heavy: fresh ? this.heavy(a, id, ok) : prev!.heavy,
-        auto: a.line_auto(id), fast: a.line_fast(id), tram: a.line_tram(id), loopKind: a.line_loop(id), oneWay: a.line_one_way(id), limit: a.line_limit(id), weekend: weekendOf(a, id), restTph: [...a.line_tph_rest(id)], shift: a.line_shift(id), upkeep: upkeepOf.get(id) ?? 0,
+        auto: a.line_auto(id), fast: a.line_fast(id), tram: a.line_tram(id), loopKind: a.line_loop(id), oneWay: a.line_one_way(id), limit: a.line_limit(id), fareDist: a.line_fare_dist(id), weekend: weekendOf(a, id), restTph: [...a.line_tph_rest(id)], shift: a.line_shift(id), upkeep: upkeepOf.get(id) ?? 0,
+        ...periodsOf(a, id),
         busRow: bus ? env.busRow(a, id, nodes ?? []) : undefined,
         pairs: bus ? 0 : a.line_pairs(id), twinOf: bus ? -1 : a.line_twin_of(id),
       });
     }
     const out: ClockLine[] = [];
     for (const r of read) {
-      const { i, id, ok, running, prev, fresh, heavy, auto, fast, tram, loopKind, oneWay, limit, weekend, restTph, shift, upkeep, pairs, twinOf } = r;
+      const { i, id, ok, running, prev, fresh, heavy, auto, fast, tram, loopKind, oneWay, limit, fareDist, weekend, restTph, shift, upkeep, pairs, twinOf, tphP, periods, periodsOwn, hours, hoursOwn, rows } = r;
       // the numbers behind the cheap fields: when all are as kept (and the heavy parts are), the row is the kept one
       const raw = li.slice(i, i + 22);
-      const extra = [upkeep, fast ? 1 : 0, tram ? 1 : 0, loopKind, oneWay ? 1 : 0, limit, shift, pairs, twinOf, ...auto, weekend.length, ...weekend, ...restTph];
+      const extra = [upkeep, fast ? 1 : 0, tram ? 1 : 0, loopKind, oneWay ? 1 : 0, limit, fareDist ? 1 : 0, shift, pairs, twinOf, ...auto, weekend.length, ...weekend, ...restTph,
+        ...tphP, periods, periodsOwn, ...hours, hoursOwn ? 1 : 0, ...(rows ? [rows.figs.length, ...rows.figs, rows.set.length, ...rows.set, rows.auto?.length ?? -1, ...(rows.auto ?? []), rows.weekend.length, ...rows.weekend] : [])];
       if (!fresh && prev && sameNumbers(raw, prev.raw) && sameNumbers(extra, prev.extra)) {
         out.push(prev.row);
         continue;
@@ -384,12 +486,16 @@ export class StateRows {
         reversals: heavy.reversals,
         endTurns: heavy.endTurns,
         ways: heavy.ways,
+        oneStops: heavy.oneStops,
         hand: heavy.hand,
         loopKind,
         oneWay,
         limit,
+        ...(fareDist ? { fareDist: true as const } : {}),
         ...(weekend.length ? { weekend } : {}),
         restTph,
+        tphP, periods, periodsOwn, hours, hoursOwn,
+        ...(rows ? { rows } : {}),
         ...(pairs === 1 || pairs === 2 ? { pairs } : {}),
         ...(twinOf >= 0 ? { twinOf } : {}),
         ...(r.busRow ? { bus: r.busRow } : {}),
@@ -444,10 +550,10 @@ export class StateRows {
     const whole = a.phases(), meta = a.profile_meta();
     this.phaseTables.clear();
     for (const id of this.phaseSeen) {
-      const m = id * 6 * 4;
-      if (m + 24 > meta.length) continue;
+      const m = id * META_PER_LINE;
+      if (m + META_PER_LINE > meta.length) continue;
       let count = 0;
-      for (let p = 0; p < 6; p++) count += meta[m + p * 4 + 1];
+      for (let p = 0; p < PROFILES_PER_LINE; p++) count += meta[m + p * 4 + 1];
       if (count > 0) this.phaseTables.set(id, whole.subarray(meta[m] * 4, (meta[m] + count) * 4));
     }
     this.phaseAll = whole;
@@ -502,6 +608,7 @@ export class StateRows {
       reversals: [...a.line_reversals(id)],
       endTurns: [...a.line_end_turns(id)],
       ways: [...a.line_stop_ways(id)],
+      oneStops: [...a.line_one_stops(id)],
       hand: a.line_hand(id),
     };
   }

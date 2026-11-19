@@ -165,6 +165,8 @@ export class StopMarkers {
   /** T-3041: the stops of a turned line served one way, with the stops either side of them on the walk */
   /** T-3122: the stops the line serves one way, to the heading of its trains there (`LineStats.oneWayAt`) */
   private oneWay = new Map<string, number>();
+  /** T-3711: the stops the player made one way with a shift-click (`LineStats.oneStops`) */
+  private oneStops = new Set<string>();
   private index = new Map<string, number>();
   private netSeen: unknown = null;
   private size = 0;
@@ -184,13 +186,15 @@ export class StopMarkers {
   private gapAsked = 0;
   /** T-3159: a clicked marker drawn in its new tier at the click, until its edit is answered; `n` clicks are out */
   private guess = new Map<string, { tier: StopTier; prev: StopTier; n: number }>();
+  /** a guess's key: the line's, since its clicks may still be out while another line is edited (T-3731) */
+  private guessKey = (line: number, id: string) => `${line}:${id}`;
 
   /** T-3109: a finger down on a marker, until it is held long enough, moves or lifts */
   private press: { id: string; x: number; y: number; timer: number } | null = null;
   /** the tap a long press leaves behind is not a click on the marker */
   private swallow = false;
 
-  constructor(private map: MlMap, private overlay: Overlay, private toggle: (station: number) => void, private loop: (station: number, tier: StopTier) => void) {
+  constructor(private map: MlMap, private overlay: Overlay, private toggle: (station: number, oneWay: boolean) => void, private loop: (station: number, tier: StopTier) => void) {
     this.gap = new GapFlash(map, overlay);
     this.box = document.createElement("div");
     this.box.className = "stop-marks";
@@ -255,6 +259,7 @@ export class StopMarkers {
       this.colour = this.line.colour;
       this.tram = !!w.lineStats[this.line.id]?.tram;
       this.oneWay = new Map(Object.entries(w.lineStats[this.line.id]?.oneWayAt ?? {}));
+      this.oneStops = new Set(w.lineStats[this.line.id]?.oneStops ?? []);
       this.box.style.setProperty("--c", this.colour);
       this.names = new Map(w.save.stations.map((s) => [s.id, s.name]));
       // After an edit to the same line the worker's last tiers stand until its new answer, with only
@@ -291,7 +296,9 @@ export class StopMarkers {
   }
 
   private applyGuesses() {
-    for (const [id, g] of this.guess) this.tiers.set(id, g.tier);
+    if (!this.line) return;
+    const head = `${this.line.num}:`;
+    for (const [k, g] of this.guess) if (k.startsWith(head)) this.tiers.set(k.slice(head.length), g.tier);
   }
 
   /** T-3159: the marker of a plain click drawn as the click will leave it, a frame after it rather than after the
@@ -299,9 +306,9 @@ export class StopMarkers {
   private guessClick(id: string) {
     const prev = this.tierOf(id);
     const tier: StopTier | null = prev === "on" ? "route" : prev === "route" || prev === "reroute" || prev === "reverse" ? "on" : null;
-    if (!tier) return;
-    const g = this.guess.get(id);
-    this.guess.set(id, { tier, prev: g?.prev ?? prev, n: (g?.n ?? 0) + 1 });
+    if (!tier || !this.line) return;
+    const key = this.guessKey(this.line.num, id), g = this.guess.get(key);
+    this.guess.set(key, { tier, prev: g?.prev ?? prev, n: (g?.n ?? 0) + 1 });
     this.tiers.set(id, tier);
     this.place();
     this.overlay.invalidate();
@@ -309,12 +316,12 @@ export class StopMarkers {
 
   /** T-3159: the edit of a plain click on station `id` is answered and the world holds it or does not: a marker
    * still showing the guess goes back to what it was when the click was refused. */
-  settleClick(id: number | string) {
-    const key = String(id), g = this.guess.get(key);
+  settleClick(line: number, id: number | string) {
+    const key = String(id), gk = this.guessKey(line, key), g = this.guess.get(gk);
     if (!g) return;
     if (--g.n > 0) return;
-    this.guess.delete(key);
-    if (!this.line) return;
+    this.guess.delete(gk);
+    if (this.line?.num !== line) return;
     const isStop = planStopsOf(this.line).includes(key), shownStop = this.tierOf(key) === "on";
     if (isStop === shownStop) return;
     this.tiers.set(key, isStop ? "on" : g.prev === "on" ? "route" : g.prev);
@@ -432,17 +439,22 @@ export class StopMarkers {
   /** What hovering a marker says: a stop's click, then its right click where that does something (T-3109). */
   private words(id: string): string[] {
     const name = this.names.get(id) ?? t("stopMarkers.station");
+    // T-3711: the shift-click, a stop between the ends of an open line served one way or both ways again
+    const ends = this.line ? planStopsOf(this.line) : [];
+    const middle = ends.length >= 3 && ends[0] !== ends[ends.length - 1] && id !== ends[0] && id !== ends[ends.length - 1];
+    const shift = touchInput.peek() ? [] : this.oneStops.has(id) ? [t("stopMarkers.shiftBothWays")] : middle && !this.oneWay.has(id) ? [t("stopMarkers.shiftOneWay")] : [];
+    const shiftAdd = touchInput.peek() || this.closedLine() ? [] : [t("stopMarkers.shiftAddOneWay")];
     switch (this.tierOf(id)) {
-      case "on": return [name, t("stopMarkers.remove"), ...(this.closedLine() ? [t("stopMarkers.rightOpen")] : [])];
+      case "on": return [name, t("stopMarkers.remove"), ...shift, ...(this.closedLine() ? [t("stopMarkers.rightOpen")] : [])];
       case "close": return [name, t("stopMarkers.remove"), t("stopMarkers.rightClose")];
       case "open": return [name, t("stopMarkers.remove"), t("stopMarkers.rightOpen")];
-      case "turn": return [name, t("stopMarkers.remove"), t("stopMarkers.rightLoopBack")];
+      case "turn": return [name, t("stopMarkers.remove"), ...shift, t("stopMarkers.rightLoopBack")];
       case "unturn": return [name, t("stopMarkers.remove"), t("stopMarkers.rightStopLooping")];
-      case "route": return [name, t("stopMarkers.add")];
-      case "reroute": return [name, t("stopMarkers.addReroute")];
+      case "route": return [name, t("stopMarkers.add"), ...shiftAdd];
+      case "reroute": return [name, t("stopMarkers.addReroute"), ...shiftAdd];
       case "reverse": {
         const at = this.revAt.get(id);
-        return [name, at === "" ? t("stopMarkers.reverseEnd", { tram: this.tram }) : this.names.get(at ?? "") ? t("stopMarkers.reverseAt", { name: this.names.get(at ?? ""), tram: this.tram }) : t("stopMarkers.reverseSome", { tram: this.tram })];
+        return [name, at === "" ? t("stopMarkers.reverseEnd", { tram: this.tram }) : this.names.get(at ?? "") ? t("stopMarkers.reverseAt", { name: this.names.get(at ?? ""), tram: this.tram }) : t("stopMarkers.reverseSome", { tram: this.tram }), ...shiftAdd];
       }
       default: return [name, t("stopMarkers.noTrack")];
     }
@@ -473,8 +485,9 @@ export class StopMarkers {
     if (this.reasonFor === null) this.showTag(this.words(id), px, py);
   }
 
-  /** A click on the marker of station `id`: the stop added or taken out. */
-  activate(id: string, px: number, py: number) {
+  /** A click on the marker of station `id`: the stop added or taken out; with Shift held (T-3711) added as a stop
+   * served one way, or a stop made one way or both ways again. */
+  activate(id: string, px: number, py: number, shift = false) {
     if (this.swallow) return void (this.swallow = false);
     // T-3118: the touch Loop button was on
     if (loopTap.peek()) {
@@ -491,8 +504,9 @@ export class StopMarkers {
       return;
     }
     this.hideTag();
-    this.guessClick(id);
-    this.toggle(Number(id));
+    // a shift-click on a stop keeps it a stop
+    if (!(shift && this.tierOf(id) === "on")) this.guessClick(id);
+    this.toggle(Number(id), shift);
   }
 
   /** T-3109: a right click (or a long press) on the marker of station `id`: the loop there closed, opened or

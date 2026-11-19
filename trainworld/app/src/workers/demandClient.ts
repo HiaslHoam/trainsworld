@@ -80,14 +80,15 @@ import {
 } from "../game/demand";
 import { FOCUS_WORKERS, FocusPool } from "./demandFocus";
 import { addressLimited, deviceGB, heapStep, memBudget, mobileDevice, smallDevice } from "./deviceMemory";
+import { outsideWasmBytes } from "./liveMemory";
 import { isMemoryFailure } from "../game/loadText";
 import { makeFrame } from "../game/frame";
 import { noteEditSolve } from "../game/editLeft";
-import { choosing, demandIdle, endCardFull, gameLoadArmed, gameLoadSeq, viewFiguresIn, gameWait, loadComplete, loadFailed, loadProgress, lastStep, markAlive, markStep, memoryResolve, onLoadStop, setDownloadProbe, solveLeft, startup, takeGameLoadHold, zoneFailures, zoneLoads, zoneSteps, type ZoneStep } from "../game/loading";
+import { choosing, demandIdle, endCardFull, gameLoadArmed, gameLoadSeq, viewFiguresIn, gameWait, loadComplete, loadFailed, loadProgress, lastStep, markAlive, markStep, memoryResolve, onLoadStop, onLoadStuck, setDownloadProbe, solveLeft, startup, takeGameLoadHold, zoneFailures, zoneLoads, zoneSteps, type ZoneStep } from "../game/loading";
 import { type BarPlace, CACHE_SHOW_MS, GAME_MS, GUESS_SHARES, keepPlace, LATER_GUESS, lastWait, loadPace, nextLeft, rememberPace, rememberWait, sameSize, type Pace, sharesOf, shownShare, solveStage, STAGE_TEXT, stagedFraction, stageInHand, STEP_CAP, timeShare, type StageMs, zoneShare } from "../game/loadBar";
 import { linesSettled } from "../game/lineFigures";
 import { clock } from "../game/clock";
-import { PERIODS, periodsMatch } from "../game/periods";
+import { PERIODS, TIMES_PER_STOP, periodsMatch } from "../game/periods";
 import { EVERYDAY_KEYS, membersOf, type PurposeFilter } from "../game/purposes";
 import { perfOff } from "../perfFlags";
 import { LEVEL, marketZonesNear } from "./demandClusters";
@@ -97,7 +98,8 @@ import { packToLngLat } from "../game/coords";
 import { addOpened, reportDemandFine } from "../game/openedZones";
 import { memoryNeed } from "../game/memoryCheck";
 import { builtKeep, firstFine, LEFT_ALONE_MS, LOD_COARSE, LOD_FINE, lodBudgetGB, lodMode, planFine, VIEW_SETTLE_MS, EDIT_KEEP_MS, zonesGB } from "./demandLod";
-import { world } from "../game/world";
+import { stopsById, world } from "../game/world";
+import { stopFareScales } from "../game/money";
 import { trackZones } from "../game/trackZones";
 import { viewCentre } from "../game/listScope";
 import { ALL_PERIODS, isQuery, type SelSquares, type BareFigures, type DemandNetwork, type FromDemand, type Heap, type OpenRejected, type QueryKind, type ToDemand } from "./demandProtocol";
@@ -109,7 +111,7 @@ import { demandTestSnapshot } from "./demandTest";
 import type { NetworkSnapshot } from "./protocol";
 import { dataUrl } from "../game/dataBase";
 import { fetchMarketDrives } from "../game/marketRule";
-import { lineFareMul, ownLineFare, type Fares } from "../game/fareCurve";
+import { lineFareMul, ownLineFare, type FareArea, type Fares } from "../game/fareCurve";
 import { takesMarketless } from "../game/fareInEffect";
 import { saveSlotsState } from "./clockClient";
 import { readDemandAhead, readDemandCache, writeDemandCache } from "./saveFile";
@@ -165,6 +167,11 @@ function cityOfPlace(place: number) {
  * to one level's trains re-solves only that level's periods (T-124), so they go to different workers.
  */
 function periodsOfWorker(i: number, n: number): number[] {
+  // T-3542: two workers deal the morning with the evening and night and the midday with the
+  // afternoon: a rush edit (four rows: morning and afternoon) then waits on one period, high
+  // demand's three still go two to one worker, and each worker has the same work as before
+  // (`PERIOD_COST`); any more workers already part morning and afternoon by index
+  if (n === 2 && PERIODS.length === 5) return i === 0 ? [0, 3, 4] : [1, 2];
   const qs = PERIODS.map((_, q) => q);
   const clash = qs.some((q) => qs.some((s) => s > q && PERIODS[s].demand === PERIODS[q].demand && s % n === q % n));
   const order = clash ? qs.slice().sort((a, b) => LEVEL[PERIODS[a].demand] - LEVEL[PERIODS[b].demand] || a - b) : qs;
@@ -258,12 +265,12 @@ function rememberPoolCap(n: number) {
 /** The service demand reads, with the UI's ids. */
 interface Service {
   frame: FrameSpec;
-  fare: { base: number; perKm: number; nodes?: [number, number][]; scales?: Record<string, number>; hsr?: number; ferry?: number; bus?: number; transfer?: number; lines?: Record<string, number> };
-  /** `complex`: the station's complex (T-161); absent = a complex of its own */
-  stations: { id: string; x: number; y: number; complex?: number; upgrades?: number }[];
+  fare: { base: number; perKm: number; nodes?: [number, number][]; scales?: Record<string, number>; hsr?: number; ferry?: number; bus?: number; transfer?: number; lines?: Record<string, number>; zones?: FareArea[] };
+  /** `complex`: the station's complex (T-161); absent = a complex of its own; `fare`: its fare zone's code (T-3740) */
+  stations: { id: string; x: number; y: number; complex?: number; upgrades?: number; fare?: number }[];
   /** `wrapS`: a circle's stand at its first stop, riding on round (T-798); `back`: run 1's stations
    * where a stop's way back is at a platform beside it (T-3348, `SnapshotLine.backStops`) */
-  lines: { id: string; stops: string[]; back?: string[]; tph: [number, number, number]; hopS: number[][][]; hopKm?: number[][]; fast?: boolean; ferry?: boolean; tram?: boolean; dwellS: number[][][]; wrapS?: number; cars: number; span?: number[]; catches?: number[][] }[];
+  lines: { id: string; stops: string[]; back?: string[]; tph: number[]; hopS: number[][][]; hopKm?: number[][]; fast?: boolean; ferry?: boolean; tram?: boolean; fareDist?: boolean; passFares?: number[][][]; dwellS: number[][][]; wrapS?: number; cars: number; span?: number[]; catches?: number[][] }[];
   /** station pairs joined by a passage (T-1281) */
   passages?: [string, string][];
   /** T-2410: stations no line stops at, left out of `stations`: their positions only reach zones
@@ -624,8 +631,8 @@ function serviceFromSnapshot(s: NetworkSnapshot): Service {
   return {
     frame: s.frame ?? LEGACY_FRAME,
     fare: s.fare ?? { base: 2, perKm: 0 }, // legacy fixed 6 perceived minutes
-    stations: s.stations.filter((st) => used.has(String(st.id))).map((st) => ({ id: String(st.id), x: st.x, y: st.y, complex: st.complex, ...(st.upgrades ? { upgrades: st.upgrades } : {}) })),
-    lines: s.lines.map((l) => ({ id: String(l.id), stops: l.stops.map(String), ...(l.backStops?.length === l.stops.length ? { back: l.backStops.map(String) } : {}), tph: l.tph, hopS: l.hopS, hopKm: l.hopKm, ...(l.fast ? { fast: true } : {}), ...(l.ferry ? { ferry: true } : {}), ...(l.tram ? { tram: true } : {}), dwellS: l.dwellS, ...(l.wrapS ? { wrapS: l.wrapS } : {}), cars: l.cars, ...(l.span ?{ span: l.span } : {}), ...(l.catches ? { catches: l.catches } : {}) })),
+    stations: s.stations.filter((st) => used.has(String(st.id))).map((st) => ({ id: String(st.id), x: st.x, y: st.y, complex: st.complex, ...(st.upgrades ? { upgrades: st.upgrades } : {}), ...(st.fare ? { fare: st.fare } : {}) })),
+    lines: s.lines.map((l) => ({ id: String(l.id), stops: l.stops.map(String), ...(l.backStops?.length === l.stops.length ? { back: l.backStops.map(String) } : {}), tph: l.tph, hopS: l.hopS, hopKm: l.hopKm, ...(l.fast ? { fast: true } : {}), ...(l.ferry ? { ferry: true } : {}), ...(l.tram ? { tram: true } : {}), ...(l.fareDist ? { fareDist: true } : {}), ...(l.passFares ? { passFares: l.passFares } : {}), dwellS: l.dwellS, ...(l.wrapS ? { wrapS: l.wrapS } : {}), cars: l.cars, ...(l.span ?{ span: l.span } : {}), ...(l.catches ? { catches: l.catches } : {}) })),
     ...(passages.length ? { passages: passages.map(([a, b]) => [String(a), String(b)] as [string, string]) } : {}),
     ...(alone.length ? { alone } : {}),
   };
@@ -654,10 +661,12 @@ function packService(svc: Service): { net: DemandNetwork; layout: Solve["layout"
     // a station without a complex number is one of its own: numbered past every complex
     complex: new Uint32Array(svc.stations.map((s, i) => s.complex ?? svc.stations.length + i)),
     ...(svc.stations.some((s) => s.upgrades) ? { ups: Uint8Array.from(svc.stations, (s) => s.upgrades ?? 0) } : {}),
+    // T-3740: the stations' fare zones, only where the fares have areas and a station has one
+    ...(svc.fare.zones?.length && svc.stations.some((s) => s.fare) ? { fz: Uint32Array.from(svc.stations, (s) => s.fare ?? 0) } : {}),
     ...(svc.passages?.length ? { passages: Uint32Array.from(svc.passages.filter(([p, q]) => index.has(p) && index.has(q)).flatMap(([p, q]) => [index.get(p)!, index.get(q)!])) } : {}),
     lineN: new Uint32Array(lines.map((l) => l.stops.length)),
     stops: new Uint32Array(nStops),
-    times: new Float32Array(6 * nStops),
+    times: new Float32Array(TIMES_PER_STOP * nStops),
     tph: new Float32Array(lines.flatMap((l) => l.tph)),
     cars: new Float32Array(lines.map((l) => l.cars)),
     fare: svc.fare,
@@ -687,7 +696,25 @@ function packService(svc: Service): { net: DemandNetwork; layout: Solve["layout"
   // T-3578: the line's own multiple scales the base too, a trip paying it times the largest of its lines'
   const own = lines.map((l) => ownLineFare(svc.fare, l.id));
   if (own.some((m) => m !== 1)) net.baseW = perNode(own);
+  // T-3748, T-3753: every trip's extras are charged at the scale of the stop each route node leaves
+  const w = world.peek();
+  if (w) {
+    const byId = stopsById(w), fareS = new Float32Array(2 * nStops).fill(1), baseS = new Float32Array(2 * nStops).fill(1);
+    let o = 0;
+    for (const l of lines) {
+      const n = l.stops.length, at = l.stops.map((id) => stopFareScales(byId.get(id), svc.fare));
+      // run 1's k-th route node leaves stop n - 1 - k
+      for (let k = 0; k < n; k++) {
+        fareS[2 * o + k] = at[k].rate; fareS[2 * o + n + k] = at[n - 1 - k].rate;
+        baseS[2 * o + k] = at[k].base; baseS[2 * o + n + k] = at[n - 1 - k].base;
+      }
+      o += n;
+    }
+    if (fareS.some((v) => v !== 1)) net.fareS = fareS;
+    if (baseS.some((v) => v !== 1)) net.baseS = baseS;
+  }
   const span = net.span!;
+  const passAt = new Map<number, number[]>();
   const layout: Solve["layout"] = [];
   let a = 0;
   for (const l of lines) {
@@ -696,10 +723,11 @@ function packService(svc: Service): { net: DemandNetwork; layout: Solve["layout"
     layout.push({ id: l.id, o: 2 * a, n, stops: l.stops, ...(back ? { back } : {}) });
     l.stops.forEach((s, k) => (net.stops[a + k] = index.get(s)!));
     if (net.back) (back ?? l.stops).forEach((s, k) => (net.back![a + k] = index.get(s)!));
-    for (let lev = 0; lev < 3; lev++) {
-      const at = (run: number) => 6 * a + (run * 3 + lev) * n;
-      const h0 = l.hopS[0]?.[lev] ?? [], d0 = l.dwellS[0]?.[lev] ?? [];
-      const h1 = l.hopS[1]?.[lev] ?? [], d1 = l.dwellS[1]?.[lev] ?? [];
+    // T-3542: per demand period
+    for (let q = 0; q < PERIODS.length; q++) {
+      const at = (run: number) => TIMES_PER_STOP * a + (run * PERIODS.length + q) * n;
+      const h0 = l.hopS[0]?.[q] ?? [], d0 = l.dwellS[0]?.[q] ?? [];
+      const h1 = l.hopS[1]?.[q] ?? [], d1 = l.dwellS[1]?.[q] ?? [];
       for (let k = 0; k < n - 1; k++) net.times[at(0) + k] = (h0[k] ?? 0) + (d0[k] ?? 0);
       // run 1 travels the stops reversed: its j-th hop leaves stop n - 1 - j
       for (let j = 0; j < n - 1; j++) net.times[at(1) + n - 1 - j] = (h1[j] ?? 0) + (d1[j] ?? 0);
@@ -711,6 +739,11 @@ function packService(svc: Service): { net: DemandNetwork; layout: Solve["layout"
       const i = run === 0 ? k : n - 1 - k, j = run === 0 ? k + 1 : n - 2 - k;
       const from = svc.stations[index.get(l.stops[i])!], to = svc.stations[index.get(l.stops[j])!];
       net.hopKm[2 * a + run * n + k] = l.hopKm?.[run]?.[k] ?? Math.hypot(to.x - from.x, to.y - from.y) / 1000;
+    }
+    // T-3758: the stations each route node's trains pass to the next stop, as `hopKm`
+    if (net.fz && l.passFares) for (let run = 0; run < 2; run++) for (let k = 0; k < n - 1; k++) {
+      const c = l.passFares[run]?.[k];
+      if (c?.length) passAt.set(2 * a + run * n + k, c);
     }
     if (l.span?.length === PERIODS.length * 2 * n) {
       for (let q = 0; q < PERIODS.length; q++) for (let r = 0; r < 2 * n; r++) span[q * 2 * nStops + 2 * a + r] = l.span[q * 2 * n + r];
@@ -730,6 +763,16 @@ function packService(svc: Service): { net: DemandNetwork; layout: Solve["layout"
       }
     }
     net.catchXY = new Float32Array(pts);
+  }
+  // T-3758: lines paying the distance fare and the stations passed, only with fare zones
+  if (net.fz) {
+    if (lines.some((l) => l.fareDist)) net.fzDist = Uint8Array.from(perNode(lines.map((l) => (l.fareDist ? 0 : 1))), (v) => (v === 0 ? 1 : 0));
+    if (passAt.size) {
+      const off = new Uint32Array(2 * nStops + 1), codes: number[] = [];
+      for (let r = 0; r < 2 * nStops; r++) { for (const c of passAt.get(r) ?? []) codes.push(c); off[r + 1] = codes.length; }
+      net.fzPassOff = off;
+      net.fzPass = Uint32Array.from(codes);
+    }
   }
   return { net, layout, ids: { lines: layout.map((l) => l.id), stations: svc.stations.map((s) => s.id) } };
 }
@@ -967,8 +1010,14 @@ class DemandClient {
     // T-325: the aux worker is told every solving worker's periods, for the zones it holds bare
     const msg: ToDemand = { kind: "init", packs: [], periods: this.periodsOf[i], ...(i < n ? this.marketsMsg(i) : {}), aux: i === n, warmEveryday, ...(perfOff("allSums") ? { allSums: true } : {}), ...(i === n ? { groups: this.periodsOf.slice(0, n) } : {}), heapStep: heapStep() };
     w.postMessage(msg);
+    // T-3781, dev server only: `?debugStall=i` has worker i's first solve wait forever (a replacement does not)
+    if (import.meta.env.DEV && Number(new URLSearchParams(location.search).get("debugStall") ?? -1) === i && !this.stallSent) {
+      this.stallSent = true;
+      w.postMessage({ kind: "debugPanic", when: "stall" } satisfies ToDemand);
+    }
     return w;
   }
+  private stallSent = false;
 
   /**
    * T-351: in a game with no station (a bare start), a building tool picked opens the viewed zone,
@@ -1641,15 +1690,35 @@ class DemandClient {
   private downloadsOpen = new Map<object, number>();
   /** T-3313: the last worker panic or replacement, for a feedback report */
   lastTrouble = "";
+  /** T-3781: each worker's last message (when, its kind), and the barrier solve period it started and has not
+   * sent the result of; the status a failure replaced; when the stuck load's workers were restarted */
+  private heard: ({ at: number; kind: string } | undefined)[] = [];
+  private inUnit: ({ round: number; period: number; at: number } | null | undefined)[] = [];
+  private statusBefore = "";
+  private stuckRestarted = 0;
   /** T-3313: where the pool stands, one line for a feedback report: the newest solve's age and how far it got,
    * the last step, the oldest download in flight and what is still being fetched (seconds) */
   diagnosis(): string {
     const now = performance.now(), s = (t: number | undefined) => (t === undefined ? "-" : Math.round((now - t) / 1000) + "s");
     const c = this.cur, v = demandView.peek(), oldest = this.oldestDownload();
     const open = [...this.downloads].filter(([, d]) => d.end === undefined).map(([f, d]) => `${f} ${Math.round(d.got / 1024)}k ${s(d.at)}`);
+    // T-3781: while round 0 is not published, the periods of it that came; each worker's last message and the
+    // period it is in (a barrier solve's `unit` not yet ended by its result)
+    const r0 = c && c.published < 0 ? c.byRound[0].map((r, q) => (r ? q : -1)).filter((q) => q >= 0) : null;
+    const who = this.workers.map((_, k) => {
+      const h = this.heard[k], u = this.inUnit[k];
+      return `w${k} ${h ? `${h.kind} ${s(h.at)}` : "silent"}${u ? ` in r${u.round} p${u.period} ${s(u.at)}` : ""}`;
+    });
     const parts = [
       `status ${this.status.slice(0, 120)}`,
+      this.statusBefore ? `before ${this.statusBefore.slice(0, 60)}` : "", // i18n-ignore
       c ? `solve v${c.version} came ${s(c.arrivedAt)} ago, sent ${c.sentAt ? s(c.sentAt) : "not yet"}, rounds ${c.roundAt?.length ?? 0}, final ${c.results.every((r) => r) ? "yes" : "no"}` : "no solve", // i18n-ignore
+      c ? `lines ${c.svc.lines.length}` : "", // i18n-ignore
+      r0 ? `round 0 periods in ${r0.join(",") || "none"} of ${c!.byRound[0].length}` : "", // i18n-ignore
+      who.join(", "),
+      this.pausedSnap ? `network held while paused ${s(this.pausedAt)}` : "", // i18n-ignore
+      `focus ${this.fpool?.alive ? "on" : "off"}`, // i18n-ignore
+      this.stuckRestarted ? `restarted when stuck ${s(this.stuckRestarted)} ago` : "", // i18n-ignore
       `shown v${v?.version ?? "-"}${v?.final ? " final" : ""}`, // i18n-ignore
       this.waiting ? `network waiting ${s(this.waiting.arrivedAt)}` : "", // i18n-ignore
       `step ${s(lastStep())} ago`, // i18n-ignore
@@ -2763,6 +2832,7 @@ class DemandClient {
 
   /** Stop the pool; also called for a load that cannot finish for another reason (T-950). */
   fail(why: string) {
+    if (!this.status.startsWith("failed")) this.statusBefore = this.status;
     this.status = "failed: " + why;
     demandUpdating.value = false;
 
@@ -2948,6 +3018,29 @@ class DemandClient {
     for (const by of this.ackedBy) by?.delete(item);
   }
 
+  /** T-3781: the loading card's watchdog found nothing moving. Once per page, every worker is replaced (as a
+   * planned restart: not counted as a panic), reopens what it held and the newest network is solved again; the
+   * focus pool stops (its figures stay shown). False when there is
+   * nothing to restart, or it was done already: the failure screen then goes up. */
+  restartStuck(): boolean {
+    if (this.stuckRestarted || this.failed || !this.workers.length || this.respawn.size) return false;
+    this.stuckRestarted = performance.now();
+    const quiet = this.diagnosis();
+    this.lastTrouble = `stuck, workers restarted: ${quiet}`.slice(0, 600); // i18n-ignore
+    console.warn("demand: nothing moved while loading, restarting the workers:", quiet); // i18n-ignore
+    this.endFocus();
+    this.endQueries();
+    for (let i = 0; i < this.workers.length; i++) {
+      this.respawn.set(i, { left: null, solving: false, planned: true });
+      this.workers[i].terminate();
+      if (this.isReady.delete(i)) this.ready--;
+      this.heard[i] = undefined;
+      this.inUnit[i] = null;
+      this.workers[i] = this.spawn(i, false);
+    }
+    return true;
+  }
+
   /** T-1174, dev server only (`?debug=1`, `twDemand.client.debugPanic`): make worker `i` panic. */
   debugPanic(i = 0, when: "now" | "solve" = "now", oom = false) {
     if (import.meta.env.DEV) this.workers[i]?.postMessage({ kind: "debugPanic", when, oom } satisfies ToDemand);
@@ -2973,6 +3066,14 @@ class DemandClient {
   /** the page's memory outside the workers' WASM, from `measureUserAgentSpecificMemory` (null where
    * that is not available: not a cross-origin isolated page) */
   private pageOther: number | null = null;
+
+  /** T-3757: the page outside the demand workers' WASM where it cannot be measured, which grows with the network: on a
+   * 7,000-station save about 5 GB, far over MEM_OTHER, so a pool of more cores ran past the budget */
+  private otherGuess(): number {
+    let first = 0;
+    for (let i = 0; i < this.computeN; i++) first = Math.max(first, this.mem[i]?.wasm ?? 0);
+    return Math.max(MEM_OTHER, outsideWasmBytes(first, this.mem[this.computeN]?.wasm ?? 0));
+  }
 
   /** `solved`: after a solve, whose heap peak stands until something closes (it held what closed) */
   private noteMem(i: number, wasm: number, heap: Heap | undefined, solved = false, closed = false) {
@@ -3031,6 +3132,16 @@ class DemandClient {
   private memCheck() {
     this.memTimer = 0;
     if (this.failed) return;
+    // T-3757: the budget's cut once quiet after a final too, so a big save opened with more cores does not hold
+    // every worker until the next solve; the workers left hold periods they never solved, so the network is solved
+    // again as after a growth
+    if (this.computeN > 1) {
+      const wait = this.quietIn();
+      if (wait > 0) return this.memSoon(wait);
+      const n0 = this.computeN;
+      this.capPool();
+      if (this.computeN < n0) return this.solveAgain();
+    }
     const over = this.overNeed();
     const n0 = this.computeN, n = this.growTo(new Set(over.map((o) => o.i)));
     if (!over.length && n <= n0) return;
@@ -3065,7 +3176,7 @@ class DemandClient {
     let per = 0;
     for (let i = 0; i < n0; i++) { const h = held(i); if (h === null) return n0; per = Math.max(per, h); }
     this.growPer = per;
-    const js = this.pageOther === null ? MEM_WORKER : 0, other = this.pageOther ?? MEM_OTHER;
+    const js = this.pageOther === null ? MEM_WORKER : 0, other = this.pageOther ?? this.otherGuess();
     const aux = (held(n0) ?? 0) + js, budget = memBudget();
     const share = shareCapped() ? SOLVING_SHARE * budget : Infinity;
     let n = n0;
@@ -3109,7 +3220,7 @@ class DemandClient {
     for (let i = 0; i < this.computeN; i++) per = Math.max(per, this.needOf(i) ?? 0);
     if (!per) return;
     // (a measured page counts each worker's JS heap in `pageOther`)
-    const js = this.pageOther === null ? MEM_WORKER : 0, other = this.pageOther ?? MEM_OTHER;
+    const js = this.pageOther === null ? MEM_WORKER : 0, other = this.pageOther ?? this.otherGuess();
     const aux = (this.needOf(this.computeN) ?? 0) + js, budget = memBudget();
     let n = this.computeN;
     const share = shareCapped() ? SOLVING_SHARE * budget : Infinity;
@@ -3119,10 +3230,12 @@ class DemandClient {
   }
 
   /** T-3373: a loading save's pool cut to what workers of `perWorker` bytes may be (`workersFor`), before
-   * its packs open; `capPool` judges again by what they then hold */
+   * its packs open; `capPool` judges again by what they then hold. T-3757: with "Use more cores", by the budget alone,
+   * the rest of the page guessed as `capPool` does (a 7,000-station save otherwise loaded on 5 workers, 13 GB). */
   private capAhead(perWorker: number) {
-    if (this.computeN <= 1 || this.respawn.size || perfOff("cap") || !shareCapped() || this.solving()) return;
-    const n = Math.min(this.computeN, workersFor(perWorker));
+    if (this.computeN <= 1 || this.respawn.size || perfOff("cap") || workersAsked() !== null || this.solving()) return;
+    const byBudget = () => Math.max(1, Math.floor((memBudget() - outsideWasmBytes(perWorker, 0)) / perWorker));
+    const n = Math.min(this.computeN, shareCapped() ? workersFor(perWorker) : byBudget());
     if (n < this.computeN) this.shrink(n, `about ${mb(perWorker)} MB a solving worker by the save's zones`); // i18n-ignore
   }
 
@@ -3274,7 +3387,7 @@ class DemandClient {
     this.fpool = new FocusPool(n, Array.from({ length: n }, (_, i) => periodsOfWorker(i, n)), {
       message: (i, msg) => this.focusMessage(i, msg),
       opened: (id) => { (this.fopened ??= new Map()).set(id, performance.now()); this.focusSoon(); },
-      failed: (why) => { console.warn(`demand: the focus pool stopped (${why})`); this.endFocus(); },
+      failed: (why) => { console.warn(`demand: the focus pool stopped (${why})`); this.lastTrouble = `focus pool stopped: ${why}`; this.endFocus(); }, // i18n-ignore
     }, this.viewMsg(), perfOff("focusAux"));
   }
 
@@ -3567,6 +3680,7 @@ class DemandClient {
   }
 
   private receive(i: number, msg: FromDemand) {
+    this.heard[i] = { at: performance.now(), kind: msg.kind };
     if (msg.kind === "failed") return isMemoryFailure(msg.error) ? this.workerDied(i, msg.error) : this.fail(`worker ${i}: ${msg.error}`); // i18n-ignore
     // i18n-ignore
     if (msg.kind === "dead") return this.workerDied(i, `${msg.error}${msg.panic ? ` (${msg.panic})` : ""}, ${Math.round(msg.memBytes / 2 ** 20)} MB of WASM memory`);
@@ -3580,6 +3694,8 @@ class DemandClient {
     if (this.reply(i, msg)) return;
     markAlive(); // T-950: (not a query's answer, which an idle worker gives while another is stuck)
     markStep();
+    if (msg.kind === "unit") { this.inUnit[i] = { round: msg.round, period: msg.period, at: performance.now() }; return; }
+    if (msg.kind === "result") this.inUnit[i] = null;
     if (msg.kind === "loads") {
       // T-1607: on to the worker solving the period's other side
       const to = msg.side === "cities" ? this.marketsOf.findIndex((qs) => qs.includes(msg.period)) : this.periodsOf.findIndex((qs, j) => j < this.computeN && qs.includes(msg.period));
@@ -3600,7 +3716,7 @@ class DemandClient {
       // T-173: worker 0 has warmed the everyday code up; the held city packs may go
       if (i === 0 && this.held) { const held = this.held; this.held = null; held.forEach((send) => send()); this.postMarkets(); }
       if (!periodsMatch(msg.periods, PERIOD_STRIDE))
-        console.error("demand: game/periods.ts disagrees with sim/src/track/params.rs PERIOD_HOURS / PERIOD_LEVEL", msg.periods);
+        console.error("demand: game/periods.ts disagrees with sim/src/track/params.rs PERIOD_HOURS / PERIOD_ROW", msg.periods);
       if (!this.periodTable.length && i < this.computeN) this.periodTable = msg.periods;
       if (!this.dayTable.length && i < this.computeN) this.dayTable = msg.days;
       if (this.respawn.has(i)) {
@@ -3867,6 +3983,7 @@ class DemandClient {
 
   /** the newest network held while paused, or null */
   private pausedSnap: NetworkSnapshot | null = null;
+  private pausedAt = 0;
   private pauseWatch: (() => void) | null = null;
 
   /** Whether `snap` waits for the game to run ("Recalculate trips while paused" off and the game paused).
@@ -3878,6 +3995,7 @@ class DemandClient {
       demandHeld.value = false;
       return false;
     }
+    if (!this.pausedSnap) this.pausedAt = performance.now();
     this.pausedSnap = snap;
     demandHeld.value = true;
     this.pauseWatch ??= effect(() => {
@@ -4994,7 +5112,8 @@ class DemandClient {
       // its service, so a panel's running cost moves with the fares these figures give
       for (const l of layout) {
         const d = v.view?.lines.get(l.id), sl = service.get(l.id);
-        if (d) { d.stops = l.stops; if (sl) { d.tph = sl.tph; d.cars = sl.cars; } }
+        // (T-3542: per period, as the service's)
+        if (d) { d.stops = l.stops; if (sl) { d.tph = Array.from(sl.tph); d.cars = sl.cars; } }
       }
       if (fares) for (const d of v.view?.lines.values() ?? []) d.solvedFares = fares;
       // T-325: and the zones open bare, from their own figures
@@ -5382,8 +5501,12 @@ let client: DemandClient | null = null;
 /** T-3313: the pool's state for a feedback report ("" before it starts) */
 export const demandDiagnosis = () => client?.diagnosis() ?? "";
 export const demandStuckSince = () => client?.stuckSince() ?? null;
-/** T-3329: MB the demand workers hold (each one's WASM and JS heap, the aux worker too); null before the pool starts */
-export const demandWorkersMB = (): number | null => client ? client.memory().reduce((a, m) => a + m.wasm + m.heap, 0) : null;
+/** T-3329, T-3757: MB of WASM memory each solving worker and the aux worker hold; null before the pool starts */
+export function demandWorkersWasmMB(): { solving: number[]; aux: number } | null {
+  if (!client) return null;
+  const m = client.memory();
+  return { solving: m.filter((x) => !x.aux).map((x) => x.wasm), aux: m.filter((x) => x.aux).reduce((a, x) => a + x.wasm, 0) };
+}
 
 const TEST = new URLSearchParams(location.search).get("demandTest") === "1";
 const DEBUG_LOD = new URLSearchParams(location.search).get("debug") === "1";
@@ -5400,6 +5523,7 @@ export function startDemand(city = HOME_CITY, newGame = false) {
   SAVED_GAME = !newGame && !TEST;
   const c = (client = new DemandClient(city));
   onLoadStop((why) => c.fail(why));
+  onLoadStuck(() => c.restartStuck()); // T-3781
   setDownloadProbe(() => c.oldestDownload()); // T-2756
   setTripQuery((from, to, purpose) => c.trip(from, to, purpose)); // T-195
   setMarketTripQuery((end, cells, far, farGid, near) => c.marketTrip(end, cells, far, farGid, near)); // T-866, T-885
