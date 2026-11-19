@@ -32,7 +32,7 @@ import { stopsById, world } from "./game/world";
 import { hiddenLevels, hiddenLines, hideBuses, levelBits } from "./game/lineVisibility";
 import { setHidden } from "./map/visibility";
 import "./game/capLoad";
-import { removeThing, setTrackHider } from "./game/remove";
+import { removeThing, removeTracks, setTrackHider } from "./game/remove";
 import { redo, undo } from "./game/fareUndo";
 import { followTrack } from "./game/trackZones";
 import { baseTrips, incomeByDay, lastSaved, moneyState } from "./game/money";
@@ -53,7 +53,8 @@ import { StationLabels } from "./map/stationLabels";
 import { stationIndexOf, tripAt } from "./map/network";
 import { cityOverview } from "./map/intercityView";
 import { Overlay } from "./map/overlay";
-import { carryGrids, pick } from "./map/pick";
+import { carryGrids, pick, SLOP_PX, topSeg } from "./map/pick";
+import { selectedPieces, shiftTrack } from "./game/trackSet";
 import { carryEdgeGrid } from "./map/snapIndex";
 import { NetworkRenderer } from "./map/renderer";
 import { followTrain } from "./map/trainFollow";
@@ -104,6 +105,7 @@ import { mountGuide } from "./ui/Guide";
 import { guideNewGame } from "./game/guide";
 import { mountKeepDot } from "./ui/KeepDot";
 import { startTips } from "./ui/tip";
+import { startModded } from "./game/modded";
 import { setupDone, startLoadingGate } from "./ui/LoadingScreen";
 import { choosing, lastLoadDied, loadCannotFinish, loadGraphicsGone, loadNoSimd, loadNoWebgl2, onGraphicsGone, startGameWait, waitKey } from "./game/loading";
 import { webgl2State } from "./map/webgl2";
@@ -142,6 +144,8 @@ const SYNTH = params.get("synth") === "1";
 
 // T-210: the game's own hover tag for every panel and control, never the browser's
 startTips();
+// T-3707: `trainsworld.markModded` for mods, and the page's own signs of not being the published game
+startModded();
 
 // ---- the clock: a new game starts on day 1 at 07:00 (morning peak) ----
 startClock(86400 + 7 * 3600);
@@ -266,6 +270,7 @@ const overlay = new Overlay(map, renderer, () => {
   const groupLines = sel?.kind === "group" && hovered === null ? (lineGroups(world.peek()?.save.lines ?? []).get(sel.group) ?? []).map((l) => l.num) : undefined;
   return {
     showTrains: d.trains,
+    showStations: d.stations || tool.peek() === "station", // T-3625: the station tool shows what it places
     byLevel: d.trackColour === "height",
     bySpeed: d.trackColour === "speed",
     byProfit: d.trackColour === "profit",
@@ -478,6 +483,7 @@ effect(() => {
 effect(() => {
   selection.value;
   display.value;
+  tool.value; // T-3625: the station tool draws stations while they are hidden
   overlay.invalidate();
 });
 
@@ -486,7 +492,7 @@ effect(() => {
   const w = world.value;
   if (w && !SYNTH) labels.set(w);
 });
-effect(() => labels.setVisible(display.value.stationNames && !SYNTH));
+effect(() => labels.setVisible(display.value.stationNames && display.value.stations && !SYNTH));
 startOpeningDay(); // T-1434
 startLineFigures(); // T-1665
 startEditNote(); // T-2125
@@ -573,6 +579,8 @@ map.on("dblclick", (e) => {
 function selectAt(x: number, y: number, add: boolean) {
   // linking a station into a complex (T-197): the station clicked is the other end
   if (linking.peek() !== null) void linkPicked(pick(overlay, x, y, false, selection.peek()));
+  // T-3634: Shift with built track selected adds or takes out the track under the pointer, a line on it or not
+  else if (add && shiftTrackAt(x, y)) return;
   // lines, stations and trains, then commuter bubbles while they are shown, then the rest (T-1515)
   else {
     const cur = selection.peek();
@@ -588,6 +596,23 @@ function selectAt(x: number, y: number, add: boolean) {
   }
 }
 capacity.selectClick = selectAt;
+/** The piece of track drawn at (x, y) px, or -1. */
+function trackAt(x: number, y: number): number {
+  const n = renderer.net;
+  if (!n) return -1;
+  const [ti] = topSeg(overlay, n.track.seg, n.track.count, x, y, SLOP_PX * SLOP_PX + 1);
+  return ti >= 0 ? n.track.edge[ti] : -1;
+}
+function shiftTrackAt(x: number, y: number): boolean {
+  const edge = trackAt(x, y);
+  return edge >= 0 && shiftTrack(edge);
+}
+// T-3634: a Shift press on track with built track selected is a click, not the start of MapLibre's zoom box
+// (which would swallow the click); elsewhere Shift+drag zooms as before
+map.on("mousedown", (e) => {
+  const o = e.originalEvent;
+  if (o.shiftKey && o.button === 0 && tool.peek() === "select" && linking.peek() === null && selectedPieces() && trackAt(e.point.x, e.point.y) >= 0) e.preventDefault();
+});
 // Linking stops when its station is no longer the selection or a tool is picked.
 effect(() => {
   const s = selection.value, from = linking.value;
@@ -623,6 +648,7 @@ window.addEventListener("keydown", (e) => {
     if (!e.repeat) manageSaveSlot("save");
   }
 }, true);
+let lastSpeedStep = 0;
 window.addEventListener("keydown", (e) => {
   if (keyIsTheirs(e)) return;
   // Esc, one thing at a time (T-096): a question waiting above the bottom bar is answered no; a
@@ -715,6 +741,11 @@ window.addEventListener("keydown", (e) => {
       void removeThing(s.kind === "track" ? { kind: "track", edge: s.edge } : { kind: "station", node: Number(s.station) });
       return;
     }
+    if (s?.kind === "tracks") {
+      e.preventDefault();
+      void removeTracks(s.edges);
+      return;
+    }
     if (!s && e.key === "Delete") {
       e.preventDefault();
       pickTool("delete");
@@ -739,6 +770,14 @@ window.addEventListener("keydown", (e) => {
   if (e.key === "Escape") {
     if (selection.peek() === null && diagramShown.peek()) diagramShown.value = false;
     else selection.value = null;
+  }
+  // T-3653: comma slows the clock by one step and period speeds it up; held (T-3717) it keeps stepping,
+  // at most every 90 ms so each stop shows
+  if ((e.key === "," || e.key === ".") && !e.ctrlKey && !e.metaKey && !e.altKey) {
+    e.preventDefault();
+    const now = performance.now();
+    if (!e.repeat || now - lastSpeedStep >= 90) { lastSpeedStep = now; clock.stepSpeed(e.key === "." ? 1 : -1); }
+    return;
   }
   // Space: pause, or carry on at the speed that was running (the clock keeps it while paused).
   if (e.key === " " && !e.repeat && !e.ctrlKey && !e.metaKey && !e.altKey) {
@@ -768,7 +807,9 @@ onStationsAhead((frame, xy, fine, built, home) => {
 onNetAhead(netAhead);
 
 // ---- T-677: the start menu; the pick starts demand, then the clock worker, in startup's order ----
-if (!urlChoice) showStartMenu((choice) => {
+// T-3643: after a died load the failure screen is the page; the menu would draw over it (same layer), and
+// Try again reloads to the menu
+if (!urlChoice && !lastDied) showStartMenu((choice) => {
   // T-728: a new game opens on its start city, or the world map; a real network (T-731) has stations, so it does not open bare
   enterGame(); // T-2477: a pan before the pick does not count
   if (choice.game) viewStart(choice.game.start, choice.game.mode);

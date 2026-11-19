@@ -153,7 +153,7 @@ institutions** (prisons, nursing homes and the like, T-234).
   the rest on the ratio of their costs [T-918]: rail's share is 1 / (1 + (rail / car)^3), so twice
   as dear gets 1 in 9, symmetric for the car, fading to nothing from 3 to 4 times either way; no
   rail constant (time and money alone), car ownership $2.00 a trip plus $0.13 a km and 7 minutes to
-  park [T-636, T-637, T-938]. A fare dollar costs 4.4 x (GDP per head / $90,000)^-0.5 perceived
+  park [T-636, T-637, T-938]; a school trip's car counts twice, pupils being driven [T-3624]. A fare dollar costs 4.4 x (GDP per head / $90,000)^-0.5 perceived
   minutes in the trip's country, GDP at market rates (the US 4.4, Japan 7.0, China 11.2, India 25),
   the car's money 3 everywhere [T-1277, T-1166, T-1521, T-2670]. The regional market keeps a damped logit
   with the plane [T-495, T-502]; its longer trips come from three income groups per country, each
@@ -238,7 +238,7 @@ player may set any piece a lower speed limit in its panel, free [T-3405]),
 places stations (on track only [T-1820]), and makes lines, all as
 **blueprints** that are free to edit and undo, then pays to **construct** them. The track and station tools' options sit in a bar on the map while the tool is on, and each click mode but plain selecting has its colour as an aura round the map [T-2282, T-2284]. A segment is one
 piece of track [T-244]; the Select tool picks many at once, blueprint or else constructed, to
-disable, re-level or remove together, and rebuild constructed track in place at another level or track type, rail to tram and back included, or single track as double, for its full new price, or double regular track as single, free with nothing back; a level change takes the stations on the track with it, those at the pick's ends ramping on the track beyond [T-333, T-815, T-829, T-3059, T-3088, T-3241, T-3296, T-3321]; one built piece's track panel rebuilds it the same way, single or double and regular or high speed, and to a level or the other family where the piece alone can go [T-3408]. Quad track is regular, high-speed or tram, drawn or doubled up from a double of that kind [T-3126, T-3166]. A station clicked on quad track goes on the pair clicked only; the game
+disable, re-level or remove together, and rebuild constructed track in place at another level or track type, rail to tram and back included, or single track as double, for its full new price, or double regular track as single, free with nothing back; a level change takes the stations on the track with it, those at the pick's ends ramping on the track beyond [T-333, T-815, T-829, T-3059, T-3088, T-3241, T-3296, T-3321]; one built piece's track panel rebuilds it the same way, single or double and regular or high speed, and to a level or the other family where the piece alone can go [T-3408], and built pieces Shift+clicked together share one track panel that rebuilds them all at one price [T-3634]. Quad track is regular, high-speed or tram, drawn or doubled up from a double of that kind [T-3126, T-3166]. A station clicked on quad track goes on the pair clicked only; the game
 adds no crossovers, so the player draws crossing track where lines should change pairs (saves keep
 their crossovers) [T-338, T-733, T-1687, T-1688]. A line with a station on the other pair beside every stop can run its trains on both pairs, a switch in its panel: half its trains on each, half a headway apart, through a hidden second line the sim keeps in step; while an edit leaves it unable to, it runs on one pair and the panel says why [T-3333]. A station's platform can be on one track only, picked with the 1-line icon in the station bar or panel: on double track it serves the trains going one way, those the other way running past on the other track, a line through it stopping the way it can and a line ending there arriving on its track; on single track it is a stop where trains cannot pass. It is priced as a single-track station and has no terminal or passing tracks [T-3332]. Single
 track is in the Build tab's Tracks row again [T-3093]; single track can run one way, set in the track inspector, and a line that goes both ways over a one-way piece takes its own way back [T-3094]. A station on one-way single track is a one-way station: a line stopping there stops once a round trip, going the way its track runs, the other way going by on its own track, wherever in the line it was clicked; two side by side on the legs of a one-way street pair are two such stops, each on the line or not [T-3565, T-3605]. With the ramp switch on, a new junction a double regular or high-speed route makes on double track is laid as a real flyover of one-way legs where it fits, its curves laid out for a flyover target max speed the player picks (80 km/h by default; faster takes more room) [T-3092, T-3169, T-3170]. Trains, trams and buses keep right or left, one side per game, picked on the new game sheet (set from the start country) and switchable in Settings, with what the switch could not fix listed [T-3297, world.md "Running side"]. Each line has
@@ -254,7 +254,8 @@ only way around [T-798]. While a line's stops are edited a click on a station ad
 junction conflicts add delay, computed from the schedules in the clock worker before demand runs,
 and no track, platform or junction carries more trains than its capacity: a line's fleet past that
 waits at its ends [T-517]. A line's schedule panel shows its schedule beside a station's departures board and its
-timetable chart, and a line group's chart [T-3346 stage 1; more modes to come, notes/T-3346.md].
+timetable chart (a bus or ferry line's its schedule alone, weekends included, T-3703), and a line group's chart
+[T-3346 stage 1; more modes to come, notes/T-3346.md].
 The clock worker owns edits (with undo for reversible changes), capacity, fleet, costs, money and
 the boarding account. Fares are paid into the cash as trains pick up riders and running costs
 drain evenly [T-284], each hour's share following when riders travel and trains run, fares
@@ -271,8 +272,8 @@ track and stations cost upkeep whether trains run or not, US$35k a km of double 
 day, US$200k for one underground (-1 to -3) [T-2619], draining evenly; a line's profit takes off its share, each piece's split by the trains a day of the lines
 using it [T-867]. The fare is a curve of trip length through three points, never falling with distance: in the Money tab the player drags the points on a graph to set fares, or sets a base fare at 0 km and, for each of the two stretches after it, its end distance and its rate per km (at least $0) [T-626, T-1112, T-1143, T-1201]. Each country charges the curve times its fare scale: by default its income's, (its GDP per head at market rates over the start country's)^0.5, or the player's own, set in the Money tab as a multiple of the reference country's fares (the first country built in, or one the player picks; switching it changes no fare); a trip pays its starting country's [T-2021, T-1277, T-1554, T-1906, T-2670, T-2679]. A new game's curve is set once for the country it starts in: $2.50, $6.50 and $22.50 at 0, 20 and 100 km in the US, those times the country's scale elsewhere (Japan $1.30, $3.40 and $12). Rides on a line with high-speed trains pay the curve's part above the base times a multiplier, 1.5 unless the player sets another in the Money tab; ferry lines do the same with their own, 1.00 by default [T-1626, T-2194, T-2195]. Each line has its own fare multiple too (0 to 3, in its panel), which also scales the base: a trip pays the base times the highest multiple among the lines it rides [T-3567, T-3578]. A fare change shows in the Money tab at once, but a line's income keeps the fares its riders were solved with until riders solved with the new ones show [T-2266]. Each line's fare income takes a share of the network's base fares, half by its boardings and half by its passenger-km, at most one base a boarding [T-2104]. The player may take one loan at a time, of $1B, $5B or $10B, repaid in 60 equal daily payments at 1% interest a game day ($22.2M a day for $1B), and refused while a payment is more than the recent daily profit [T-1661, T-2022, T-1906]. Prices and fares in full: track-and-service.md 6.4.
 **Points** measure each city's network: what its network earns on a forecast weekday (the current solve's, so an edit moves it as soon as the solve answers; the clock, weekends and holidays never do), at 20 a rail trip (a rider's whole journey, changes included, counted in the
-city it starts in) and 1 a passenger-km; not a running total, and they unlock nothing yet [T-684,
-T-694]. A city's goals are train shares of 10%, 20%, 30% and 40%, each kept once reached: the 10%
+city it starts in) and 1 a passenger-km, each line's times the share of its running cost its fares pay, at most all of it (fares paying half: half its points; upkeep not counted) [T-3657]; not a running total, and they unlock nothing yet [T-684,
+T-694]. A city's goals are train shares of 10%, 20%, 30% and 40% of its trips within (its local trips and the regional market's between its own far-apart parts [T-3509]), each kept once reached: the 10%
 one is a star in the Cities list [T-685], 10% and 20% are ticks on the trips bar in the city view, and all are listed there as
 goals reached once reached [T-1437, T-1438, T-1551, T-2145]. In the seven cities with a real network save the bar also marks
 the train share that real network gets in this game [T-2145].
@@ -303,7 +304,7 @@ under 1.3 times the shortest, with bends up to 300 m and a speed each point by i
 at 0.15 m/s²; US$10M a port, US$8M a boat and US$40 a boat-km to run. The player places ports only with
 the Ferry tool (beside Bus, key O; T-2194); the line draws dashed, boats as pointed hulls, with a panel
 like a bus line's whose port list takes a port out by its dot or moves one by dragging (T-2275), and a
-Ferry fare row in the Money tab. A new line runs a boat every 20, 30 and 60 minutes at high, medium and low demand (T-2273, T-3400). In demand (T-2195) a ferry line is a line like
+Ferry fare row in the Money tab. A new line runs a boat every 20, 30 and 60 minutes at high, medium and low demand (T-2273, T-3400), or the ferry default once one is set (T-3703). In demand (T-2195) a ferry line is a line like
 any other, its ports stations, with no boarding cost; its rides pay the curve's part above the base
 times the Ferry multiple, and trips by ferry are the network's. A tenth of visits and attractions
 trips are ferry fans, for whom each minute aboard a ferry counts 0.1 (T-2196, docs/demand-mode.md).
@@ -336,7 +337,7 @@ Panels take CSS tokens (`ui/style.css`); the map's light and dark colours (basem
 ink) are one table, `game/shades.ts`, whose basemap palette is warm paper land, soft teal water and sage parks [T-676]. The network takes the line colours, the same in both themes. One dock on the left holds the icon tabs (Build, Lines, Stations, Finances, Cities), the
 saved games button and the Settings gear, with the inspector under them, whose top edge never
 moves. The top bar holds the mode split (the goal number) of the city in view, or zoomed far out the world's train trips a day ("11.8M trips/day", T-1440), the cash, the local time and date beside or over
-a moving sky and a band in the demand level's colours (T-861), pause and three speeds. **Panels show what can change**: labels, numbers and states,
+a moving sky and a band in the demand level's colours (T-861), pause, slower and faster. **Panels show what can change**: labels, numbers and states,
 no explanatory notes [T-253]. **Everything drawn that encodes a number has a hover**, always the
 game's own tag, never a browser tooltip [T-194, T-210]. Motion is allowed where it helps, never
 slowing a control (Anita 2026-10-29). A new normal game shows a **Tutorial card**, a post-it
@@ -396,8 +397,11 @@ on reload when the network, packs and build match [T-328].
 Keeping old saves loading is a nicety: only Anita has saves. An optional account, noritetsu's on
 `shonei-server` (one sign-in for both pages), lists a signed-in player's normal games by points on
 a world leaderboard and one per city and country, each person once per board. A game counts at its
-current figures, the forecast weekday's points, never its best ever, so a demand change never leaves an unreachable score up, and
-on each board a person's row is their best game there; a game that was ever a sandbox is never listed [T-972, T-973, T-3248, T-3465; docs/ui-panels.md "Account and leaderboards"].
+current figures, the forecast weekday's points, never its best ever, so a demand change never leaves an unreachable score up;
+they are sent only once trips are calculated for the network as it is, never a load's or an edit's early figures, and
+on each board a person's row is their best game there; a game that was ever a sandbox, or is modded (a mod ran, or
+another site or the public repo's build played it), is never listed, and the server keeps figures only from the
+published game on anita.garden [T-972, T-973, T-3248, T-3465, T-3639, T-3707; docs/ui-panels.md "Account and leaderboards"].
 Games synced between devices and sharing by link come later (T-988 to T-990).
 [docs/architecture.md](docs/architecture.md) 11.
 

@@ -75,7 +75,12 @@ export interface LineInput {
   name: string;
   /** "#rrggbb", from the saturated line palette or player-set */
   colour: string;
+  /** the stops its trains serve: its plan, or the part of it a partly built line runs (T-3474) */
   stops: StationId[];
+  /** T-3474: its whole plan where `stops` is only part of it (stop editing reads `planStopsOf`), and
+   * where `stops` starts in it */
+  planStops?: StationId[];
+  stopStart?: number;
   tph: Tph;
   /** the player's line group (T-1791), absent for none, and its name, "" for its oldest line's */
   group?: number;
@@ -262,6 +267,12 @@ export interface ModeSplit {
   none?: number;
 }
 
+/** T-3474: a line's planned stops, which stop edits change; `stops` is what its trains serve, only
+ * part of the plan while the rest is unbuilt. */
+export function planStopsOf(l: Pick<LineInput, "stops" | "planStops">): StationId[] {
+  return l.planStops ?? l.stops;
+}
+
 /** A loop run both ways (T-798, T-2981): its round trip is two laps, its trains half each way. */
 export function loopHalves(st: Pick<LineStats, "loop" | "oneWay">): boolean {
   return !!st.loop && !st.oneWay;
@@ -330,6 +341,8 @@ export type Selection =
   | { kind: "busStop"; lines: LineId[]; stop: string }
   | { kind: "station"; station: StationId }
   | { kind: "track"; edge: EdgeId }
+  /** T-3634: two or more built pieces Shift+clicked together, for the track panel's Rebuild (game/trackSet.ts) */
+  | { kind: "tracks"; edges: EdgeId[] }
   | { kind: "junction"; node: NodeId }
   /** a train: its profile (line, run, demand level) and departure, absolute game seconds */
   | { kind: "train"; line: LineId; profile: number; dep: number }

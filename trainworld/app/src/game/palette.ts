@@ -310,6 +310,14 @@ export const CLICK_MODE_COLOURS = {
   passage: "#b0866a",
 } as const;
 
+/** T-3693, T-3714: each track type's colour for the track tool's aura and descriptor square and the track count
+ * icon in its placing tag (game/buildMode.ts). Regular is the track tool's own colour. */
+export const TRACK_TYPE_COLOURS = {
+  rail: CLICK_MODE_COLOURS.track,
+  hsr: "#5a5fc8",
+  tram: "#c0603a",
+} as const;
+
 /** Letter colour on a line chip: dark on light lines (yellow), white on the rest. */
 export function inkOn(hex: string): string {
   const [r, g, b] = rgb(hex).map((v) => v / 255);

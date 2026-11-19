@@ -59,6 +59,9 @@ station buildings and T-2278's parking by income). The full rules are in demand.
   A longer trip into another country is damped too: to half inside the EU, Schengen and the UK
   (London - Paris about 30,000 a weekday), and much more elsewhere, the more so the poorer the
   traveller's country (0.26 for the richest).
+  A longer trip can also go between two parts of one big zone 25 km and more apart, and some of the long commutes stay inside their own zone. Those count as the
+  zone's own trips: in its Trips within, its train share and its goals, and in its bubbles. New
+  York has about 2.4M such legs a day, 3.5% of its trips.
 - **Weekends and holidays.** Saturdays and Sundays each have their own demand: on a Saturday
   shopping is up by 40% on a weekday and commuting is down to a third; on a Sunday shopping is
   about a weekday's, outings are up by two thirds and commuting is a quarter. A line's country
@@ -204,6 +207,8 @@ counted in the totals, by no mode. Car ferries don't count as roads.
   fares, which leaves the 0.5.
 - Owning the car: $2.10 a trip plus $0.1365 a km, at 3 minutes a dollar. A typical trip pays $3.05
   to $5.50, and a driver's day comes to about $14. The long trips between cities pay none.
+- Going to school, all of the above counts twice: pupils don't drive, a parent drives them and
+  makes the trip too. So school trips walk and take the train more. University counts once.
 - Everyone can drive. "Walking" also stands for cycling and short bus trips (one reason its share
   runs above the census's), and "car" for driving, taxis and longer bus trips. The trip explorer's
   Walk and Drive rows say so in their hovers.

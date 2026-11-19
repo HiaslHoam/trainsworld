@@ -579,6 +579,19 @@ notes/T-420.md has the tables.
   Milan's Area C, Durham) join the list when a pack covers them. Check: a day's parking price in
   a city's main and secondary centres against the rule, and a free-parking-at-work survey where
   one exists.
+- **Driving to school** (T-3624, Anita 2026-11-18: "about twice", one factor and nothing else). A
+  school trip's car counts twice in mode choice, everything a driver pays (the drive, ownership,
+  parking at both ends) times `everyday::SCHOOL_CAR_MUL` 2: pupils don't drive, a parent drives them
+  and makes the trip too. It is read wherever the car is weighed for a school trip: the everyday
+  layer's choice against rail and walking, its share walking with no rail, the trip explorer, and
+  the outings across zone lines (`intercity/pass.rs`; their walking share with no rail is made by
+  `bin/cross_everyday.rs` with the factor, and takes it at the next world run). University is its
+  own purpose and keeps 1; commutes, the longer trips and the drive to a station keep 1 too.
+  Both rail and walking gain, walking most, as school trips are short (notes/T-3624.md). Why it may not carry
+  over: where pupils travel alone young (Japan, much of Europe) or by school bus (the US, where
+  "walking" also stands for that bus), the driving parent is rarer than this; where few households
+  have a car the factor matters little. Check: a country's travel survey mode shares for school trips
+  (NHTS, England's NTS) against the model's school shares.
 
 ### Walking and riding to a station
 
@@ -1119,6 +1132,13 @@ notes/T-420.md has the tables.
   (New York - Philadelphia about 2.5-6x plausible, notes/T-379.md, T-438). Check: each country's national travel survey by distance band (MiD Germany, ENTD France,
   NTS England, Japan's Inter-Regional Travel Survey) and its cross-border counts; another open
   area, or a factor per country pair, where they disagree (with country tailoring).
+- **Trips within one zone** (T-3509, Anita 2026-11-18: "yes, all trips within should count"). The
+  market's trips between two 6 km zones of one zone, its longer trips (25 km and more apart) and the
+  long commutes that stay in their own zone (T-1000), count in that zone's Trips within, so in its
+  train share and goals, with its local trips; its bubbles count them at both ends as its trips with
+  other places (ui-demand-views.md "Local trip bubbles"). New York about 2.4M legs on the average
+  day (3.5% of its local), driving unless by rail. Before a game's first line there is no market, and
+  the figure is the local trips alone.
 - **Resort towns** (T-3280, docs/regional.md 5.1 "Resort towns"; Anita 2026-11-12, a local factor for Japan).
   79 Japanese resort municipalities' published visitors a year, each visit a day counting as 4 people, join the
   ground attraction of their sites; fitted under Hakone's and Atami's rail counts. Why it may not carry over:

@@ -20,7 +20,7 @@ import { restHolds } from "./hoverRest";
 import { markAt, markTip } from "./gradeMarks";
 import { hoverHeld } from "../ui/blurHold";
 import { live } from "./live";
-import { levelAtStart, type NetworkBuffers } from "./network";
+import { F_FADED, levelAtStart, type NetworkBuffers } from "./network";
 import { circleTip, stationTip, trainTip, upgradeTip, type TipLine } from "./networkTips";
 import { busLineTip, busStopTip } from "./busLayer";
 import type { Overlay } from "./overlay";
@@ -35,7 +35,8 @@ import type { CrowdedStretch } from "../game/boarding";
 import { loadText } from "../game/today";
 import { t, tNumber, tRich, type MessageKey } from "../i18n";
 import type { ComponentChild } from "preact";
-import { chip, kids, elevationFact, factRow, lineBullet, lineBullets, speedFact, trainSpeedFact } from "./trackTagRows";
+import { chip, kids, elevationFact, factRow, lineBullet, lineBullets, speedFact, trackCountIcon, trainSpeedFact } from "./trackTagRows";
+import { quadTwin } from "./quadTwin";
 import { stretchLoad, tripsLanded } from "./stretchLoad";
 import { crowdColour, profitColour } from "../game/palette";
 import { floorAt } from "./buildingFloors";
@@ -77,7 +78,8 @@ function lineTip(n: NetworkBuffers, w: WorldView | null, dv: DemandView | null, 
   const l = w?.save.lines.find((x) => x.num === num);
   const name = l ? named(l) : t("trackHover.line", { num });
   const status = l ? w?.lineStats[l.id]?.status : undefined;
-  if (status === "planned") return [name, t("trackHover.notRunningYet")];
+  // T-3474: so is the part of a partly built line's plan its trains do not run yet, drawn faded
+  if (status === "planned" || (l?.planStops && (n.lines.flags[i] & F_FADED) !== 0)) return [name, t("trackHover.notRunningYet")];
   if (status === "broken") return [name, t("trackHover.notRunning")];
   if (!l) return [name];
   // T-1907: the riders in every track view; outside Traffic a tag without them says nothing of demand
@@ -222,10 +224,10 @@ export function trackTip(ov: Overlay, px: number, py: number, zoom = 12, out?: {
     if (out) out.hot = { line: L.colour[i] };
     // T-473: the track under the line says its elevation and speed too; T-2387: the other lines on it
     // are left out, as they read as part of the hovered line
-    return [...lineTip(n, w, demandView.peek(), d.trackColour === "traffic", i, ov.renderer.fullStretch(L.colour[i], L.stretch ? L.stretch[i] : -1)), ...trackFacts(ov, L.edge[i], px, py, slop)];
+    return [...lineTip(n, w, demandView.peek(), d.trackColour === "traffic", i, ov.renderer.fullStretch(L.colour[i], L.stretch ? L.stretch[i] : -1)), ...trackFacts(ov, L.edge[i], px, py, slop, countIcon(n, w, L.edge[i]))];
   }
   if (hit.kind !== "track") return null;
-  const facts = trackFacts(ov, hit.edge, px, py, slop);
+  const facts = trackFacts(ov, hit.edge, px, py, slop, countIcon(n, w, hit.edge));
   if (!facts.length) return null;
   if (out) out.hot = { edge: hit.edge };
   // T-473: always the elevation, speed and lines on it, whatever the track display; no lines row
@@ -236,6 +238,15 @@ export function trackTip(ov: Overlay, px: number, py: number, zoom = 12, out?: {
     return [...money, ...edgeRiders(n, hit.edge, on), ...facts, lineBullets(on)];
   }
   return !w && lineOnEdge(n, hit.edge) ? [...facts, t("trackHover.lineRuns")] : [...money, ...facts];
+}
+
+/** T-3727: the track count's icon in the track type's colour, for the front of the elevation row (quad where a twin
+ * pair runs beside the edge, quadTwin.ts); none on a crossover or without the save. */
+function countIcon(n: NetworkBuffers, w: WorldView | null, edge: number): SVGSVGElement | null {
+  const e = w?.edges.find((x) => x.id === edge);
+  if (!e || e.crossover) return null;
+  const count = e.tracks === 1 ? 1 : quadTwin(n, w!.edges, edge) >= 0 ? 4 : 2;
+  return trackCountIcon(e.kind ? "tram" : e.hsr ? "hsr" : "rail", count);
 }
 
 /** T-2420: the Profit view's rows for the track stretch an edge is on: the share of its costs the fares cover on
@@ -294,12 +305,13 @@ function buildingTip(b: BuildingInput): TipLine[] {
 
 /** The elevation and speed limit at a point of an edge's track stroke, on one row (T-473, T-526,
  * T-2007); none off the stroke. */
-function trackFacts(ov: Overlay, edge: number, px: number, py: number, slop: number): TipLine[] {
+function trackFacts(ov: Overlay, edge: number, px: number, py: number, slop: number, count: SVGSVGElement | null = null): TipLine[] {
   const T = ov.renderer.net!.track;
   const [i] = topSeg(ov, T.seg, T.count, px, py, slop, undefined, 0, (j) => T.edge[j] === edge);
   if (i < 0) return [];
   const lv = levelAtStart(T.level[i]);
-  const rows: TipLine[] = [T.speed?.[i] !== undefined ? factRow(elevationFact(lv), speedFact(T.speed[i])) : factRow(elevationFact(lv))];
+  const lead = count ? [count] : [];
+  const rows: TipLine[] = [T.speed?.[i] !== undefined ? factRow(...lead, elevationFact(lv), speedFact(T.speed[i])) : factRow(...lead, elevationFact(lv))];
   // T-1271: the Speed view draws the trains' speed where they run, the limit elsewhere; say which
   if (display.peek().trackColour === "speed") {
     const v = T.trainSpeed?.[i] ?? -1;

@@ -32,6 +32,7 @@ export const Icon = {
   follow: () => <svg viewBox="0 0 16 16"><circle cx="8" cy="8" r="3.5" /><circle class="solid" cx="8" cy="8" r="1.4" /><path d="M8 1.5v3M8 11.5v3M1.5 8h3M11.5 8h3" /></svg>,
   pause: () => <svg viewBox="0 0 16 16"><path class="stroke2" d="M5.5 3.5v9M10.5 3.5v9" /></svg>,
   play1: () => <svg viewBox="0 0 16 16"><path class="solid" d="M5 3.5l7 4.5-7 4.5z" /></svg>,
+  slower: () => <svg viewBox="0 0 16 16"><path class="solid" d="M13.5 4L8 8l5.5 4zM8 4L2.5 8 8 12z" /></svg>,
   play2: () => <svg viewBox="0 0 16 16"><path class="solid" d="M2.5 4l5.5 4-5.5 4zM8 4l5.5 4L8 12z" /></svg>,
   play3: () => <svg viewBox="0 0 16 16"><path class="solid" d="M1.5 5l4 3-4 3zM6 5l4 3-4 3zM10.5 5l4 3-4 3z" /></svg>,
   track: () => <svg viewBox="0 0 16 16"><path d="M2.5 10.5l8-8M5.5 13.5l8-8M3 9l4 4M6 6l4 4M9 3l4 4" /></svg>,
@@ -86,6 +87,7 @@ export const Icon = {
   allStops: () => <svg viewBox="0 0 16 16"><path d="M8 1.5v13M5 3.5h6M5 6.5h6M5 9.5h6M5 12.5h6" /></svg>,
   related: () => <svg viewBox="0 0 16 16"><path d="M6 1.5v13M10 1.5v8c0 1.8 1 3 3 5" /><rect x="3.5" y="4.5" width="9" height="3.5" rx="1.75" /></svg>,
   // two parallel tracks with an express pair added beside them
+  arrowUp: () => <svg viewBox="0 0 16 16"><path d="M8 14V2.5M3.5 7 8 2.5 12.5 7" /></svg>,
   doubleUp: () => <svg viewBox="0 0 16 16"><path d="M1.5 3h13M1.5 6h13M8 9v6M5 12h6" /></svg>,
   // T-2951: track with a square point on it, and a plus
   addPoint: () => <svg viewBox="0 0 16 16"><path d="M1.5 13.5l4.5-3M10 10.5l4.5 3M12 1.5v5M9.5 4h5" /><rect x="6" y="8.5" width="4" height="4" /></svg>,

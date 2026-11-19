@@ -100,6 +100,7 @@ export type EditOp =
   | { op: "doubleUp"; edge: EdgeId }
   /** single track run one way (`dir` 1 a to b, 2 b to a) or both (0), the lines that ran against it taking another way in the same edit (T-3094); refused with "OneWayNoWay:<line>" */
   | { op: "oneWay"; edge: EdgeId; dir: 0 | 1 | 2 | 3 }
+  | { op: "oneWays"; edges: EdgeId[]; dirs: (0 | 1 | 2 | 3)[] }
   /** T-3405: a speed limit on pieces of track, km/h, 0 for none; free */
   | { op: "pieceLimit"; edges: EdgeId[]; kmh: number }
   | { op: "stationProps"; node: NodeId; platform: number; name: string }
@@ -337,6 +338,9 @@ export type ToClock =
   | { kind: "newGame"; name?: string; game?: NewGameSpec }
   /** T-728: make this normal game a sandbox, for good */
   | { kind: "sandbox" }
+  /** T-3707: this page is not the published game, or runs a mod (game/modded.ts): the game in hand and every game
+   * loaded or started after are marked modded, for good. `why`: the page's reasons, all of them each time */
+  | { kind: "modded"; why: string[] }
   /** T-3297: every train, tram and bus to the other side (`TrackApi.flip_right_hand`), answered with "answer": the
    * sites, two numbers each (sim `FLIP_*`: 1 single track turned round, an edge; 2 a line moved, 3 a line left
    * broken; 4 a junction now crossing flat, 5 one-way track no train can use, a node) */
@@ -366,7 +370,7 @@ export type ToClock =
   | {
       kind: "query";
       seq: number;
-      q: { what: "insertStop"; line: number; station: number } | { what: "stopTiers"; line: number } | { what: "stopGap"; line: number; station: number } | { what: "passedStations"; line: number } | { what: "junction"; node: number } | { what: "lineDelays"; line: number; level: number } | { what: "lineWaits"; line: number; level: number } | { what: "passingSpots"; line: number } | { what: "lineHeld"; line: number } | { what: "lineMarks"; line: number } | { what: "lineProfile"; line: number } |{ what: "lineRelated"; line: number } | { what: "lineTrips"; line: number; t0: number; t1: number } | { what: "stationDeps"; line: number; node: number; t0: number; t1: number } | { what: "edgePis"; edge: number } | { what: "flyover"; node: number } | { what: "upgradeCost"; node: number } | { what: "tracksCost"; node: number } | { what: "upgradeCosts"; nodes: number[]; bit: number } |{ what: "platformCost"; nodes: number[]; platform: number } | { what: "doubleUp"; edge: number } | { what: "oneWay"; edge: number; dir: number } | { what: "lineAccount"; line: number; day: number } | { what: "linePeriods"; line: number; day: number } | { what: "linesPeriods"; lines: number[]; day: number } |{ what: "today" } | { what: "removal"; edges: number[]; stations: number[] } | { what: "busQuote"; line: number; route: number[] } | { what: "rebuildQuote"; edges: number[]; stations: number[]; level: number | null; kind: number; tracks: number } | { what: "blueprintQuote" } | { what: "blueprintPieces" } | { what: "lineCost"; line: number } | { what: "buildingQuote"; id: number | null; corners: number[] } | { what: "linePairs"; line: number };
+      q: { what: "insertStop"; line: number; station: number } | { what: "stopTiers"; line: number } | { what: "stopGap"; line: number; station: number } | { what: "passedStations"; line: number } | { what: "junction"; node: number } | { what: "lineDelays"; line: number; level: number } | { what: "lineWaits"; line: number; level: number } | { what: "passingSpots"; line: number } | { what: "lineHeld"; line: number } | { what: "lineMarks"; line: number } | { what: "lineProfile"; line: number } |{ what: "lineRelated"; line: number } | { what: "lineTrips"; line: number; t0: number; t1: number } | { what: "stationDeps"; line: number; node: number; t0: number; t1: number } | { what: "edgePis"; edge: number } | { what: "flyover"; node: number } | { what: "upgradeCost"; node: number } | { what: "tracksCost"; node: number } | { what: "upgradeCosts"; nodes: number[]; bit: number } |{ what: "platformCost"; nodes: number[]; platform: number } | { what: "doubleUp"; edge: number } | { what: "oneWays"; edges: number[]; dirs: number[] } | { what: "lineAccount"; line: number; day: number } | { what: "linePeriods"; line: number; day: number } | { what: "linesPeriods"; lines: number[]; day: number } |{ what: "today" } | { what: "removal"; edges: number[]; stations: number[] } | { what: "busQuote"; line: number; route: number[] } | { what: "rebuildQuote"; edges: number[]; stations: number[]; level: number | null; kind: number; tracks: number } | { what: "blueprintQuote" } | { what: "blueprintPieces" } | { what: "lineCost"; line: number } | { what: "buildingQuote"; id: number | null; corners: number[] } | { what: "linePairs"; line: number };
     };
 
 /** T-531: each region's today and this hour, as the "cash" message carries them. */
@@ -381,6 +385,11 @@ export interface MoneyState {
   mode: GameMode;
   /** T-3115: a copy of a shared network: it plays as normal and never ranks */
   copy?: boolean;
+  /** T-3707: played in a page that is not the published game, or with a mod (`SaveHeader.modded`): never ranks */
+  modded?: boolean;
+  /** T-3687: the save slot this game is played in ("" for none). A load sends the new game's money before the slot
+   * list says it is playing, so the page scores a game only while the two name the same slot. */
+  slot: string;
   /** cars owned, and the cars the running lines need */
   fleet: number;
   carsNeeded: number;
@@ -565,9 +574,16 @@ export interface ClockLine {
   delay: [number, number, number];
   dwell: number;
   turnaround: number;
+  /** the stops its trains serve: its plan, or the part of it a partly built line runs (T-3474) */
   stops: number[];
-  /** `edge << 1 | direction`, first stop to last */
+  /** `edge << 1 | direction`, first stop to last, of `stops` */
   path: number[];
+  /** T-3474: its whole plan (`TrackApi.line_stops`, `line_path`) where `stops` and `path` are only
+   * the part of it its trains run, and where that part starts in it; absent when they are the plan */
+  planStops?: number[];
+  planPath?: number[];
+  stopStart?: number;
+  pathStart?: number;
   /** T-3117: the return run's path, last stop to first, where it is not `path` run backward (round
    * one-way track: a flyover's other leg) */
   back?: number[];

@@ -15,7 +15,7 @@ use super::bridge;
 use super::cost::{BlockIndex, ClassGrid, GeoMask, MaskSet, NoWater, RunMask, TransformedMask, UnionMask, WaterMask, WorldWater};
 use super::frame::FrameKind;
 use super::geom::{self, design_radii, GeomIssue, Pi};
-use super::net::{CrossKind, EdgeData, GroupLook, Issue, LineData, LoopKind, Network, NodeData, StationData, Weekend};
+use super::net::{CrossKind, EdgeData, GroupLook, Issue, LineData, LoopKind, Network, NodeData, StationData, Weekend, SPLIT_ROOM};
 use super::params::*;
 use super::profile;
 use super::roads::{self, RoadTile, Roads};
@@ -154,6 +154,8 @@ pub struct TrackApi {
     /// T-2669: per line id, its running cost over the world price list (its countries' prices,
     /// `set_line_run_factors`); 1 for a line not listed. Never saved: the app sends it.
     run_factor: Vec<f64>,
+    /// T-3647: the save level of the game the next `load` opens (`set_load_level`), else this build's.
+    load_level: u32,
 }
 
 // T-2820: the last panic's message, as the demand module's (`demand::wasm`), for the clock worker's
@@ -401,6 +403,7 @@ impl TrackApi {
             link_charge: 0.0,
             last_port: u32::MAX,
             run_factor: vec![],
+            load_level: save::LEVEL,
         }
     }
 
@@ -712,8 +715,15 @@ impl TrackApi {
         }
     }
 
+    /// T-3647: the save level (the game header's `level`) of the player's game the next `load` opens, so a game
+    /// saved before 0.4 keeps the way its single track ran then (`Network::pin_station_runs`). Taken by that load.
+    pub fn set_load_level(&mut self, level: u32) {
+        self.load_level = level;
+    }
+
     /// Replace the network with a saved one. False if the bytes are not a save.
     pub fn load(&mut self, bytes: &[u8]) -> bool {
+        let level = std::mem::replace(&mut self.load_level, save::LEVEL);
         let (bytes, eras) = split_eras(bytes);
         match save::decode(bytes) {
             Ok(mut net) => {
@@ -736,7 +746,10 @@ impl TrackApi {
                 net.roads = self.w.net.roads.clone();
                 net.streets = self.w.net.streets.clone();
                 self.w = TrackWorld::new(net);
-                if stop_every_pass(&mut self.w.net) | legs::straighten_legs(&mut self.w.net) {
+                if level <= save::OLD_STATION_WAYS && self.w.net.pin_station_runs() {
+                    self.w.reload();
+                }
+                if reroute_against_ways(&mut self.w.net) | stop_every_pass(&mut self.w.net) | legs::straighten_legs(&mut self.w.net) {
                     self.w.reload();
                 }
                 // T-2669: the last game's lines' prices are not this one's; the app sends them again
@@ -1166,6 +1179,26 @@ fn stop_every_pass(net: &mut Network) -> bool {
             d.stops = stops;
             changed |= net.set_line(l, Some(d)).is_ok();
         }
+    }
+    changed
+}
+
+/// T-3672: every rail line of a loaded save whose path runs against the way its track now takes (a
+/// save made before a way rule changed: legs that split and join again now run one way) through its
+/// same stops by a way that runs, as an edit changing a way moves its lines (`way_reroutes`). A line
+/// with no such way is left as it was, broken. Whether any changed.
+fn reroute_against_ways(net: &mut Network) -> bool {
+    let mut changed = false;
+    for l in 0..net.line_count() as u32 {
+        if !net.line_ok(l) || net.line_bus[l as usize].is_some() || net.line_ferry[l as usize].is_some() || net.line_path(l).iter().all(|&p| net.dir_ok(p)) {
+            continue;
+        }
+        let stops = net.line_stops(l).to_vec();
+        let once = net.line_runs_once(l);
+        let Some(path) = net.route_hops(&stops).ok().filter(|p| !p.is_empty() && (once || net.back_path_of(&stops, p).is_some())) else { continue };
+        let mut d = net.line_data(l).unwrap();
+        d.path = path;
+        changed |= net.set_line(l, Some(d)).is_ok();
     }
     changed
 }
@@ -2132,7 +2165,10 @@ impl TrackApi {
         if !net.line_ok(line) {
             return vec![];
         }
-        let Some(&s) = net.line_stops(line).iter().min_by_key(|&&s| net.node_platform[s as usize]) else { return vec![] };
+        // T-3474: of the stops its trains serve, as its trains are sized
+        let part = self.w.svc.lines.get(line as usize).filter(|l| l.part.is_some());
+        let stops = part.map_or(net.line_stops(line), |l| &l.stops[..]);
+        let Some(&s) = stops.iter().min_by_key(|&&s| net.node_platform[s as usize]) else { return vec![] };
         vec![((net.node_platform[s as usize] as f64 / CAR_LEN).floor().max(1.0)) as u32, s]
     }
     /// Per demand level (high, medium, low): round trip s, trains needed, delay s.

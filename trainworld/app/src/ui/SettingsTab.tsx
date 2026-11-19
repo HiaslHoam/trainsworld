@@ -2,7 +2,7 @@
 // their own panel (ui/SavesPanel.tsx).
 
 import type { ComponentChildren } from "preact";
-import { useEffect, useState } from "preact/hooks";
+import { useEffect, useRef, useState } from "preact/hooks";
 import { budgetGB, budgetKind, gbText, liveGB } from "../game/memoryEstimate";
 import { CURRENCIES, CURRENCY, isCurrency } from "../game/currency";
 import { exact } from "../game/format";
@@ -25,10 +25,11 @@ import { accountState } from "../game/account";
 import { AccountButton, AccountSection, loginText } from "./AccountPanel";
 import { CommunityButton } from "./Community";
 import { PurposeSelect } from "./DemandSelector";
-import { FeedbackButton, FeedbackPanel } from "./FeedbackPanel";
+import { FeedbackButton } from "./FeedbackPanel";
 import { t, tNumber, type MessageKey } from "../i18n";
 import { LanguageSelect } from "./LanguageSelect";
 import { SideRow } from "./SideSwitch";
+import { SettingsSearch } from "./SettingsSearch";
 
 const THEME_NAME: Record<Theme, MessageKey> = { pink: "settingsTab.pink", blue: "settingsTab.blue", green: "settingsTab.green" };
 const SHADE_NAME: Record<Shade, MessageKey> = { light: "settingsTab.light", dark: "settingsTab.dark" };
@@ -47,6 +48,7 @@ const percent = (v: number) => tNumber(v, { style: "percent", maximumFractionDig
 
 export function SettingsTab() {
   const d = display.value;
+  const list = useRef<HTMLDivElement>(null);
   // T-264, T-1373: a superholiday's days while one is within 21 days, each an icon named on hover
   const away = awayNear.value, rush = rushRun.value;
   // on a row of their own under the four, which leave no room beside them in the dock
@@ -57,6 +59,8 @@ export function SettingsTab() {
   if (rush && wBack) days.push(["back", <span class="day-away" data-tip={t("settingsTab.dayOf", { holiday: wBack })} aria-label={wBack}><Icon.goBack /></span>]);
   return (
     <>
+      <SettingsSearch list={list} />
+      <div class="settings-list" ref={list}>
       <div class="settings-top">
         <button class={"btn icon help-open" + (helpOpen.value ? " on" : "")} data-tip={mobileDevice() ? t("help.name") : t("dock.tabTip", { name: t("help.name"), key: HELP_KEY })} aria-label={t("help.name")} aria-pressed={helpOpen.value} onClick={() => (helpOpen.value = !helpOpen.peek())}>
           <Icon.question />
@@ -73,7 +77,7 @@ export function SettingsTab() {
         <Segmented<DayShown> options={worded(DAY_OPTIONS)} value={days.some(([k]) => k === d.dayShown) ? d.dayShown : DAY_OPTIONS.some(([k]) => k === d.dayShown) ? d.dayShown : "average"} onChange={(v) => setDisplay("dayShown", v)} />
       </div>
       {days.length > 0 && (
-        <div class="slider day-super">
+        <div class="slider day-super" data-search-follow>
           <span />
           <Segmented<DayShown> options={days} value={d.dayShown} onChange={(v) => setDisplay("dayShown", v)} />
         </div>
@@ -93,7 +97,7 @@ export function SettingsTab() {
         <Segmented<BubbleScheme> options={worded(SCHEME_OPTIONS)} value={d.bubbleColours} onChange={(v) => setDisplay("bubbleColours", v)} />
       </div>
       {d.bubbleColours === "ramp" && (
-        <div class="pickers">
+        <div class="pickers" data-search-follow>
           <label>
             <input type="color" value={d.rampFrom} onInput={(e) => setDisplay("rampFrom", (e.target as HTMLInputElement).value)} />
             {t("settingsTab.ramp0")}
@@ -111,7 +115,10 @@ export function SettingsTab() {
         <Check checked={d.trains} onChange={(v) => setDisplay("trains", v)}>
           {t("settingsTab.trains")}
         </Check>
-        <Check checked={d.stationNames} onChange={(v) => setDisplay("stationNames", v)}>
+        <Check checked={d.stations} onChange={(v) => setDisplay("stations", v)}>
+          {t("settingsTab.stations")}
+        </Check>
+        <Check checked={d.stationNames}onChange={(v) => setDisplay("stationNames", v)}>
           {t("settingsTab.stationNames")}
         </Check>
         <Check checked={d.capacity} onChange={(v) => setDisplay("capacity", v)}>
@@ -203,20 +210,14 @@ export function SettingsTab() {
       <CurrencyRow />
       <div class="h">{t("settingsTab.performance")}</div>
       <div class="checks">
-        <Check checked={d.moreCores} onChange={(v) => setDisplay("moreCores", v)}>
-          <span data-tip={t("settingsTab.moreCoresTip")}>{t("settingsTab.moreCores")}</span>
-        </Check>
+        <MoreCoresCheck />
         <Check checked={d.runInBackground} onChange={(v) => setDisplay("runInBackground", v)}>
           {t("settingsTab.runInBackground")}
         </Check>
         <Check checked={d.recalcWhilePaused} onChange={(v) => setDisplay("recalcWhilePaused", v)}>
           {t("settingsTab.recalcWhilePaused")}
         </Check>
-        {mobileDevice() && (
-          <Check checked={d.mobileIntercity} onChange={(v) => setDisplay("mobileIntercity", v)}>
-            <span data-tip={t("settingsTab.mobileIntercityTip")}>{t("settingsTab.mobileIntercity")}</span>
-          </Check>
-        )}
+        <IntercityCheck />
       </div>
       <MemoryRow />
       <div class="h">{t("settingsTab.lineShapes")}</div>
@@ -229,13 +230,17 @@ export function SettingsTab() {
         ))}
       </div>
       <AccountSection />
-      <FeedbackButton />
-      <FeedbackPanel />
-      <div class="donate">
-        <a class="btn icon" href="https://ko-fi.com/anitamaps" target="_blank" rel="noopener" data-tip={t("settingsTab.donateTip")} aria-label={t("settingsTab.kofi")}><Icon.kofi /></a>
-        <span class="muted" data-tip={t("settingsTab.donateTip")}>{t("settingsTab.donate")}</span>
+      {/* found by their own text, not under the section above (T-3681) */}
+      <div data-search-group data-search-alone>
+        {/* T-3630: the form itself is mounted on its own (startFeedbackUi), so the start menu and the failure screen open it too */}
+        <FeedbackButton />
+        <div class="donate">
+          <a class="btn icon" href="https://ko-fi.com/anitamaps" target="_blank" rel="noopener" data-tip={t("settingsTab.donateTip")} aria-label={t("settingsTab.kofi")}><Icon.kofi /></a>
+          <span class="muted" data-tip={t("settingsTab.donateTip")}>{t("settingsTab.donate")}</span>
+        </div>
+        <Credits />
       </div>
-      <Credits />
+      </div>
     </>
   );
 }
@@ -325,6 +330,16 @@ function GameMode() {
 
 /** T-247: the size of the panels and their text (and of the map's name tags), remembered per browser. */
 function UiScale() {
+  return (
+    <>
+      <div class="h">{t("settingsTab.uiScale")}</div>
+      <UiScaleStepper />
+    </>
+  );
+}
+
+/** The panel size's stepper alone; also in the start menu's settings (T-3630). */
+export function UiScaleStepper() {
   const s = uiScale.value;
   const i = UI_SCALES.findIndex((v) => Math.abs(v - s) < 0.001);
   const step = (d: number) => {
@@ -333,10 +348,23 @@ function UiScale() {
     setDisplay("uiScale", to);
     return undefined;
   };
+  return <Stepper wide label={t("settingsTab.uiScaleLabel")} value={<span>{percent(s)}</span>} onStep={step} />;
+}
+
+/** T-381: more demand workers, read when a game loads; here and in the start menu's settings (T-3630). */
+export function MoreCoresCheck() {
   return (
-    <>
-      <div class="h">{t("settingsTab.uiScale")}</div>
-      <Stepper wide label={t("settingsTab.uiScaleLabel")} value={<span>{percent(s)}</span>} onStep={step} />
-    </>
+    <Check checked={display.value.moreCores} onChange={(v) => setDisplay("moreCores", v)}>
+      <span data-tip={t("settingsTab.moreCoresTip")}>{t("settingsTab.moreCores")}</span>
+    </Check>
+  );
+}
+
+/** T-2838, T-3630: trips between cities, on every device; here and in the start menu's settings. */
+export function IntercityCheck() {
+  return (
+    <Check checked={display.value.intercityTrips} onChange={(v) => setDisplay("intercityTrips", v)}>
+      <span data-tip={t("settingsTab.mobileIntercityTip")}>{t("settingsTab.mobileIntercity")}</span>
+    </Check>
   );
 }

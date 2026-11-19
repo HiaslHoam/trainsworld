@@ -3,11 +3,12 @@
 // and its dialog. Nothing shows unless the server's `trainworldCommunity` is on (game/community.ts). Names reach the
 // page only through Preact's text and the canvas's fillText, never as HTML.
 
+import { FindInput } from "./FindInput";
 import { useEffect, useRef, useState } from "preact/hooks";
 import { CITIES, zoneCountry } from "../game/cities";
 import realmsJson from "../game/realms.json";
 import { accountOpen, boardSetting, loadBoardSetting, session, shareableSlot } from "../game/account";
-import { SEARCH_MAX, TITLE_MAX, communityOn, communityPagesOn, communitySearchOn, communityOpen, copyName, currentShare, fetchShare, fetchShares, linkedShare, loadDrawing, myShares, newSeed, openSharedView, refreshMyShares, reportShare, setLiked, shareAgain, shareAsk, shareTick, sharedWhen, sharesLeft, shareLink, sharePhase, shareGame, stopSharing, type ReportReason, type ShareRow, type ShareView } from "../game/community";
+import { SEARCH_MAX, TITLE_MAX, communityOn, communityNewestOn, communityPagesOn, communitySearchOn, communityOpen, copyName, currentShare, fetchShare, fetchShares, linkedShare, loadDrawing, releaseDrawing, myShares, newSeed, openSharedView, refreshMyShares, reportShare, setLiked, shareAgain, shareAsk, shareTick, sharedWhen, viewedRow, viewedShare, sharesLeft, shareLink, sharePhase, shareGame, stopSharing, type ReportReason, type ShareRow, type ShareView } from "../game/community";
 import { saveSlotsState } from "../workers/clockClient";
 import { pointsScore, pointsShort } from "../game/points";
 import { shade, theme as colourTheme } from "../game/ui";
@@ -84,7 +85,7 @@ function useDrawing(row: ShareRow): { s: DecodedShare | null; failed: boolean } 
   useEffect(() => {
     let live = true;
     loadDrawing(row).then((s) => { if (live) setState({ key, s, failed: false }); }, () => { if (live) setState({ key, s: null, failed: true }); });
-    return () => { live = false; };
+    return () => { live = false; releaseDrawing(row); };
   }, [key]);
   return state.key === key ? state : { s: null, failed: false };
 }
@@ -95,6 +96,25 @@ function PointsLine({ row }: { row: ShareRow }) {
     {city && <span>{city}</span>}
     {points && <span>{points}</span>}
     {row.sandbox && <span class="save-sandbox small">{t("savesPanel.sandbox")}</span>}
+  </div>;
+}
+
+/** T-3685: under the day and night picture, a share's heart while its network, opened from Community, is the game in
+ * hand: the same like as on its card. Nothing for a saved game opened again, or a share that is the player's own. */
+export function ViewedLike() {
+  const v = viewedShare.value, row = viewedRow.value, st = saveSlotsState.value;
+  const [msg, setMsg] = useState("");
+  if (!v || !row || row.id !== v.id || !(st.viewing || (v.slot && v.slot === st.active))) return null;
+  const like = async () => {
+    if (!session.peek()) { accountOpen.value = true; return; }
+    setMsg("");
+    try { const r = await setLiked(row.id, !row.liked); viewedRow.value = { ...row, liked: r.liked, likes: r.likes }; }
+    catch (e) { setMsg((e as Error).message); }
+  };
+  return <div class="sky-like">
+    <button type="button" class={"btn text cm-like" + (row.liked || row.mine ? " on" : "")} disabled={row.mine} aria-label={row.liked ? t("community.unlike") : t("community.like")} aria-pressed={!!row.liked}
+      data-tip={row.mine ? t("community.errOwn") : t("community.likes", { count: row.likes })} onClick={like}><Icon.heart /><span class="num">{row.likes}</span></button>
+    {msg && <p class="acct-msg bad">{msg}</p>}
   </div>;
 }
 
@@ -286,7 +306,7 @@ function Browse() {
   // the player's own shares, for Share again on an opened one
   useEffect(() => { void refreshMyShares(); }, [signedIn]);
   // T-3402: Random is fetched a page at a time (the server's order is the seed's); the others arrive whole
-  const paged = view === "random" && communityPagesOn();
+  const paged = (view === "random" || view === "newest") && communityPagesOn();
   useEffect(() => { setPage(0); }, [view, city, seed, search, signedIn, shareTick.value]);
   useEffect(() => {
     let live = true;
@@ -302,7 +322,7 @@ function Browse() {
   if (picked) return <Detail key={picked.id} row={picked} onBack={() => setPicked(null)} onChange={change} />;
   if (linked || linkWait) return <p class="small muted">{t("leaderboard.loading")}</p>;
   const list = rows ?? [], total = paged ? count : list.length, pages = Math.max(1, Math.ceil(total / PAGE)), shown = paged ? list : list.slice(page * PAGE, (page + 1) * PAGE);
-  const views: [ShareView, string][] = [["random", t("community.random")], ["top", t("community.biggest")], ["liked", t("community.mostLiked")]];
+  const views: [ShareView, string][] = [["random", t("community.random")], ...(communityNewestOn() ? [["newest", t("community.newest")] as [ShareView, string]] : []), ["top", t("community.biggest")], ["liked", t("community.mostLiked")]];
   return <>
     <div class="cm-bar">
       <div class="cm-views" role="tablist">
@@ -313,7 +333,7 @@ function Browse() {
         <CityPick boardKey={boardKey} mine={mine} all={ALL_CITIES} countries={lands} more={{ ...MORE_PLACES, regions: areas }} onPick={setBoardKey} />
       </div>
       {view === "random" && <button type="button" class="btn text cm-shuffle" onClick={() => setSeed(newSeed())}>{t("community.shuffle")}</button>}
-      {searchOn && <input type="search" class="new-game-find cm-search" maxLength={SEARCH_MAX} placeholder={t("community.search")} aria-label={t("community.search")}
+      {searchOn && <FindInput type="search" wrap="cm-search" class="new-game-find" onClear={() => setTyped("")} maxLength={SEARCH_MAX} placeholder={t("community.search")} aria-label={t("community.search")}
         value={typed} onInput={(e) => setTyped((e.target as HTMLInputElement).value)}
         onKeyDown={(e) => { if (e.key === "Escape" && typed) { e.preventDefault(); e.stopPropagation(); setTyped(""); } }} />}
     </div>
