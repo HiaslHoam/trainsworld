@@ -148,3 +148,22 @@ their code, and lands in the game with the Online section of the Co-op button al
   line in `data-version.txt`) means setting `TW_DATA_VERSION` to it and rebuilding `dist`.
 - AGPL: friends using the game over the network are users, so link the source (your public fork) from somewhere they
   can see it, and replace the name, logo and the Ko-fi/Discord links, which belong to the original project.
+
+## Updating
+
+Everything goes through the fork's `dev` branch; `main` stays a plain copy of the original.
+
+- **The original developer's changes:** `scripts/update-from-upstream.sh` fetches their commits, merges them into
+  `dev`, rebuilds what changed (wasm, dependencies), type-checks and runs the relay tests. It stops at merge
+  conflicts and lists the files; fix them, commit, and run it again with `--build-only`. Git remembers how a conflict
+  was resolved (`rerere`), so the same one is not fixed twice. Then test co-op by hand (host in one tab, join in
+  another, edit on both sides) and `git push origin dev`.
+- **Your own changes:** commit on `dev`, push.
+- **Deploying:** `DEPLOY_TARGET=you@server:/opt/trains scripts/deploy.sh` builds the game and copies `app/dist` over
+  (players get it on their next page load); add `--relay` when `relay/` changed, which also copies it and restarts
+  it. `--dry-run` shows what would be copied. The script needs `rsync`, so on Windows run it from WSL. It is not tried
+  against a real server yet.
+- If `trainworld/data-version.txt` changed, set `TW_DATA_VERSION` on the server to the new line (the script reminds
+  you); the cache keeps the old files apart from the new ones.
+- A game build is "another version" for co-op: a guest whose build differs from its host's is refused with a message
+  and has to reload. After a deploy, players in a running game should reload.
