@@ -15,6 +15,7 @@ import { t } from "../../i18n";
 import { startFollow } from "../../map/cameraFollow";
 import { toLngLat } from "../../map/geo";
 import { live } from "../../map/live";
+import { profileLine, profileRun } from "../../map/profiles";
 import { tripAt } from "../../map/network";
 import { TRAINS_ZOOM } from "../../map/stationGeometry";
 
@@ -32,10 +33,10 @@ function runningTrips(num: number) {
   const now = clock.now(), out: { profile: number; dep: number; s: number; run: number }[] = [];
   for (let i = 0; i < r.tripCount; i++) {
     const profile = r.trips[i * 2];
-    if (Math.floor(profile / 6) !== num) continue;
+    if (profileLine(profile) !== num) continue;
     const dep = r.trips[i * 2 + 1] + r.tripsEpoch;
     const at = tripAt(n, profile, dep + r.tripLag(i), now, r.tripEnds ? r.tripEnds[i] + r.tripsEpoch : -Infinity);
-    if (at) out.push({ profile, dep, s: at.s, run: Math.floor(profile / 3) % 2 });
+    if (at) out.push({ profile, dep, s: at.s, run: profileRun(profile) });
   }
   return out;
 }
