@@ -24,7 +24,8 @@ import type { EditOp } from "../workers/protocol";
 import { clock, SPEEDS } from "./clock";
 import { openTransport, resetTransport, type CoopTransport } from "./coopTransport";
 import { relayClosed, restoreRelay } from "./relayTransport";
-import { applyRemoteEdit, edit, say, setCoopHooks } from "./world";
+import { choosing } from "./loading";
+import { applyRemoteEdit, edit, say, setCoopHooks, world } from "./world";
 
 type Role = "host" | "guest";
 type Stored = { role: Role; id: string; epoch: number; /** host: reloaded for a sync, the guests not yet told */ awaitGo?: boolean;
@@ -81,7 +82,10 @@ function write() {
 function post(m: Msg) {
   channel?.send(m);
 }
-const loaded = () => gameStamp.peek() > 0;
+/** A game is open to host or join: its state is in and the start menu is not up. (Not `gameStamp > 0`: that is the worker's
+ * count of games loaded since the page opened, and the first empty game of a page keeps 0.) */
+export const gameOpen = () => !!world.peek() && !choosing.peek();
+const loaded = gameOpen;
 
 // ---- the host ----
 
@@ -168,7 +172,8 @@ const asked = new Map<number, (a: EditAnswer, seq: number) => void>();
 let hostSpeed: { running: boolean; x: number } | null = null;
 let applyingClock = false;
 
-const inGame = () => !!me && me.role === "guest" && me.epoch > 0 && loaded();
+// a guest has the host's game once its load has been announced (`gameStamp`), which comes a moment before its state: the host answers `ready` at once
+const inGame = () => !!me && me.role === "guest" && me.epoch > 0 && gameStamp.peek() > 0;
 
 async function pump() {
   if (pumping) return;

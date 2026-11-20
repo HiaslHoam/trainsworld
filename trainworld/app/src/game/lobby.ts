@@ -2,9 +2,8 @@
 // address comes from game/relayTransport.ts; with none, there is no online co-op and the panel shows none.
 
 import { signal } from "@preact/signals";
-import { gameStamp } from "../workers/clockClient";
 import { t } from "../i18n";
-import { hostGame, joinGame } from "./coop";
+import { gameOpen, hostGame, joinGame } from "./coop";
 import { relayBase, useRelayRoom } from "./relayTransport";
 import { say } from "./world";
 
@@ -58,7 +57,7 @@ export async function lobbyRefresh() {
 export async function hostOnline(title: string) {
   const base = relayBase();
   if (base === null) return;
-  if (gameStamp.peek() === 0) { say(t("coop.needGame"), true); return; }
+  if (!gameOpen()) { say(t("coop.needGame"), true); return; }
   try {
     const r = await post("/api/games", { title: title.trim(), city: "" });
     if (!r.ok) { say(t("coop.relayFailed"), true); return; }

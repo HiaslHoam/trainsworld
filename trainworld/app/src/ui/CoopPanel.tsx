@@ -6,13 +6,15 @@ import { useEffect, useState } from "preact/hooks";
 import { coopGuests, coopRole, coopStatus, hostGame, joinGame, leaveCoop, resync } from "../game/coop";
 import { hostOnline, joinOnline, lobbyGames, lobbyLogin, lobbyProbe, lobbyReady, lobbyRefresh, lobbyUser } from "../game/lobby";
 import { relayLink } from "../game/relayTransport";
-import { gameStamp } from "../workers/clockClient";
+import { choosing } from "../game/loading";
+import { world } from "../game/world";
 import { t } from "../i18n";
 
 /** The online part of the menu: sign in, host the game in hand, the open games. */
 function Online({ close }: { close: () => void }) {
   const [code, setCode] = useState(""), [bad, setBad] = useState(false), [title, setTitle] = useState("");
   const user = lobbyUser.value;
+  const noGame = !world.value || choosing.value;
   useEffect(() => {
     void lobbyRefresh();
     const timer = window.setInterval(() => void lobbyRefresh(), 4000);
@@ -35,7 +37,7 @@ function Online({ close }: { close: () => void }) {
       <span class="muted small">{t("coop.signedIn", { name: user })}</span>
       <div class="coop-host-row">
         <input type="text" value={title} maxLength={60} placeholder={t("coop.gameTitle")} onInput={(e) => setTitle((e.target as HTMLInputElement).value)} />
-        <button class="btn" disabled={gameStamp.value === 0} onClick={() => { close(); void hostOnline(title || user); }}>{t("coop.hostOnline")}</button>
+        <button class="btn" disabled={noGame} onClick={() => { close(); void hostOnline(title || user); }}>{t("coop.hostOnline")}</button>
       </div>
       {games.length === 0 && <span class="muted small">{t("coop.noGames")}</span>}
       {games.map((g) => (
@@ -51,13 +53,15 @@ function Online({ close }: { close: () => void }) {
 export function CoopPanel() {
   const [open, setOpen] = useState(false);
   const role = coopRole.value, status = coopStatus.value;
+  // a game is open (see gameOpen in game/coop.ts); read here as signals so the buttons follow it
+  const noGame = !world.value || choosing.value;
   useEffect(() => { void lobbyProbe(); }, []);
   if (!role) {
     return (
       <div class="coop-panel">
         {open && (
           <div class="coop-menu">
-            <button class="btn" disabled={gameStamp.value === 0} onClick={() => { setOpen(false); hostGame(); }}>{t("coop.host")}</button>
+            <button class="btn" disabled={noGame} onClick={() => { setOpen(false); hostGame(); }}>{t("coop.host")}</button>
             <button class="btn" onClick={() => { setOpen(false); joinGame(); }}>{t("coop.join")}</button>
             <p class="muted small">{t("coop.hint")}</p>
             {lobbyReady.value && <Online close={() => setOpen(false)} />}
