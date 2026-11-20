@@ -262,6 +262,16 @@ svg .stroke2 { stroke-width: 2; }
 .sp-title .sp-word { color: var(--muted); font-weight: 400; font-size: 14px; }
 .sp-title .sp-mode { margin-left: 14px; }
 .sp-title .sp-close { margin-left: auto; }
+/* the station board (ui/inspector/StationPanel.tsx) */
+.saves-panel.station-panel { width: min(640px, calc(100vw - 40px)); }
+.station-panel .sb-tabs { margin-left: 14px; }
+.station-panel .sb-body { padding: 8px 14px 14px; overflow-y: auto; min-height: 220px; max-height: calc(100vh - 160px); }
+.station-panel .sb-body .sp-board { max-height: 52vh; }
+.sb-deps li { display: flex; align-items: center; gap: 8px; }
+.sb-deps .sb-time { font-variant-numeric: tabular-nums; font-weight: 700; min-width: 44px; }
+.sb-deps .what { display: flex; flex-direction: column; min-width: 0; }
+.sb-share .what { display: flex; flex-direction: column; gap: 3px; min-width: 0; }
+.sb-share .sb-bar { display: block; height: 4px; border-radius: 2px; background: var(--accent); opacity: 0.55; min-width: 1px; }
 .sp-body { display: flex; gap: 28px; align-items: flex-start; }
 .sp-left { flex: 0 0 330px; min-width: 0; }
 .sp-left .h:first-child { margin-top: 6px; }
