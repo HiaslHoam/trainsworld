@@ -1,0 +1,4 @@
+# files that run on Linux (the server, Docker) keep LF line endings even when checked out on Windows
+*.sh text eol=lf
+Dockerfile text eol=lf
+trainworld/deploy/* text eol=lf
