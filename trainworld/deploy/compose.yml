@@ -1,0 +1,35 @@
+# The private trainsworld server behind Traefik (relay/README.md). On the server this file sits in /opt/trains next
+# to `relay/` (the relay's code), `dist/` (the built game), `.env` (see env.example) and `data-cache/`; the bundle
+# script (scripts/make-deploy-bundle.sh) puts them together. No ports are published: Traefik reaches the service
+# over the `proxy` network.
+#
+#   docker compose up -d --build
+#   docker compose logs -f trains
+
+services:
+  trains:
+    build: ./relay
+    restart: unless-stopped
+    environment:
+      TW_INVITES: ${TW_INVITES}
+      TW_SECRET: ${TW_SECRET}
+      TW_LOGIN_PATH: ${TW_LOGIN_PATH}
+      TW_DATA_VERSION: ${TW_DATA_VERSION}
+      TW_SECURE: "1"
+      TW_TRUST_PROXY: "1"
+    volumes:
+      - ./dist:/app/dist:ro
+      - ./data-cache:/app/data-cache   # the container runs as uid 1000: chown 1000:1000 data-cache
+    networks:
+      - proxy
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.trains.rule=Host(`${TRAINS_HOST}`)"
+      - "traefik.http.routers.trains.entrypoints=websecure"
+      - "traefik.http.routers.trains.tls.certresolver=myresolver"
+      - "traefik.http.services.trains.loadbalancer.server.port=8787"
+      - "traefik.docker.network=proxy"
+
+networks:
+  proxy:
+    external: true

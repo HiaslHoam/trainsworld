@@ -62,6 +62,14 @@ the dev page with `?relay=http://localhost:8787` (the address is kept for the ta
 
 ## Deploy with Traefik
 
+**The short way:** `scripts/make-deploy-bundle.sh --host trains.example.org --friends "alice,bob"` builds the game and writes
+a folder (default `../trains-deploy`) with `compose.yml` (`trainworld/deploy/compose.yml`: Docker labels for Traefik's
+`proxy` network, `websecure` entrypoint and `myresolver` certificate resolver; change those names in the file if yours
+differ), the relay's code, the built game and a `.env` with random invite codes, cookie secret and secret sign-in path
+(not printed; `--show-codes` prints them). Copy that folder to the server and run `docker compose up -d --build`; the
+folder's `INSTALL.txt` has the steps. Running the script again on the same folder updates the game and keeps the codes.
+The details below explain what is in it.
+
 1. **Build the game** on a machine with the toolchain: `cd trainworld/app && npm install && npm run build`, and copy
    `app/dist` to the server (e.g. `/opt/trains/dist`).
 

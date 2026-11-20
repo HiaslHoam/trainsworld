@@ -241,4 +241,4 @@ setInterval(() => {
   }
 }, 30000).unref();
 
-server.listen(PORT, BIND, () => console.log(`trainsworld relay on http://${BIND}:${PORT} (login page ${LOGIN_PATH}, ${invites.length} invites)`));
+server.listen(PORT, BIND, () => console.log(`trainsworld relay on http://${BIND}:${PORT} (${invites.length} invites; the sign-in path is not logged)`));
