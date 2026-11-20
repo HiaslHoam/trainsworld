@@ -34,7 +34,7 @@ roads and under its labels, so under our own network (which is drawn on the over
 everything). Three classes by colour and width, in both themes (`realMain`, `realOther`, `realMetro`
 in `game/shadeTable.ts`): main line, other passenger rail, metro. Light rail is drawn as other rail: the tiles carry no usage, so
 S-Bahn and S-tog track come with Stadtbahn, US light rail, the DLR and Metrolink [T-3285]. Trams, monorails,
-funiculars, narrow gauge, heritage lines and track no line runs over are drawn only under All, which shows every feature the tiles carry, and also freight (usage freight or industrial, yards, sidings, spurs) and abandoned or disused rail from a second archive per region, `<cc>_extra.pmtiles`, built by `pipeline/real_extra.py` [T-3464]: drawn under the region's passenger layer, freight a thin solid line (`realFreight`) and abandoned a thinner dashed one (`realAbandoned`), only for regions `extra.json` lists, never in Passenger or while snapping. Until the worldwide rebuild runs, All shows no freight. While the track tool snaps, the layer shows only what that track type follows (all but tram rail for train track, all but monorail for tram track, under All; the passenger track under Passenger, with every tram line for tram track) [T-3495, T-3069, ui-building.md "Snapping to the real network"]. Lines appear
+funiculars, narrow gauge, heritage lines and track no line runs over are drawn only under All, which shows every feature the tiles carry, and also freight (usage freight or industrial, yards, sidings, spurs) and abandoned or disused rail from a second archive per region, `<cc>_extra.pmtiles`, built by `pipeline/real_extra.py` [T-3464]: drawn under the region's passenger layer, freight a thin solid line (`realFreight`) and abandoned a thinner dashed one (`realAbandoned`), only for regions `extra.json` lists, never in Passenger. Until the worldwide rebuild runs, All shows no freight. While the track tool snaps, the layer shows only what that track type follows (all but tram rail for train track, all but monorail for tram track, under All, freight and abandoned rail included [T-3495]; the passenger track under Passenger, with every tram line for tram track) [T-3495, T-3069, ui-building.md "Snapping to the real network"]. Lines appear
 from zoom 6 [T-2748: from zoom 4 a view of Europe drew 41 regions' tiles, most of a frame's cost on
 the map a new game picks a city on]; each region's tiles are added when the view first touches it, nearest first, and
 nothing is fetched while it is hidden. The lines are noritetsu's per-region tiles (OSM and
@@ -42,9 +42,12 @@ the national registers, one `track` layer); the tiles carry no line type or name
 there is no high-speed class and no hover yet.
 
 **Real stations** [T-3570, `map/realStations.ts`]: "Show stations" under the Real world network buttons, off by
-default, draws a small filled dot on each real station (`realMetro` purple, 36% opaque in light,
-42% in dark, `realStationOpacity`) from zoom 10, over the lines and under the labels, whenever the lines show
-(by the setting or while snapping). Hovering a dot shows the station's name and nothing else (the name the
+default, draws a soft dot on each real station (`realMetro` purple, 36% opaque in light, 42% in dark,
+`realDotOpacity`) from zoom 10, over the real lines and under the game's network and labels, whenever the lines show
+(by the setting or while snapping). While the station tool is active it draws a hollow ring instead (85% opaque,
+a pale halo outside it, `realStationOpacity`; radius 3 px at zoom 10 to 8.5 at 18) on a canvas above the network,
+so over blueprints, built track and platforms and under the labels and stop marks, taking no clicks.
+Hovering a mark shows the station's name and nothing else (the name the
 station tool would give it, else the local name). A station whose every line is a tram, funicular, monorail or
 narrow gauge one shows only where those lines do: under All, or while tram track snaps. The stations are
 noritetsu's model's (`data/<cc>/stations.json`, junction points left out; the tram test reads the region's
@@ -408,7 +411,7 @@ has no hover of its own; the track tool's tag names the class and its factor [T-
   (built):
   - A **flat crossing** (an X) and a **flat junction** (a fork, a node with three or more track ends
     and no station, not a flyover, where two moves through it can cross at its level by the rule of
-    track-and-service.md 6.2: T-3103, `capacity::junction_crosses`, so no badge where every move merges or diverges) in a round badge with a thin ring. On blueprint track and in the
+    track-and-service.md 6.2: T-3103, `capacity::junction_crosses`, so no badge where every move merges or diverges; on built track also none until two moves lines run cross there, or, for a crossing, until a line is on each of its edges: T-3745, `capacity::conflict_nodes`, `edges_in_use`; blueprint marks and the drawing preview always show) in a round badge with a thin ring. On blueprint track and in the
     drawing tool's preview (the crossings and junctions the new track would make, from the track
     model) the badge is big: radius 7 px at zoom 9, 11 at 12, 15 at 15. On built track it is small
     and quiet from zoom 11, at 85% opacity: 7.5 px at zoom 14, following the square root of the
@@ -555,12 +558,16 @@ centres are within 100 m (demand's merge distance) are linked too, whatever thei
 directly or through others, plus the player's links [T-197] and every station touching one station
 building [T-2217]. Worked out whenever stations or links change; only links and buildings are saved.
 Riders change between any two stations of a complex on foot [T-161, [demand-kernel.md](demand-kernel.md) 4.4].
-A complex has one name by default [T-3288]: the stations nobody typed a name for all show the name of the oldest
-of them (`workers/stateRows.ts` `foldNames`; the model keeps each station's own name), so the map labels it once;
-a station with a typed name keeps its own. Where one name stands for the complex (Stations tab row, diagram label)
-it is the member's whose name the player typed, else the one with the most lines [T-2683, `game/complexLead.ts`].
-A splitting or merging complex changes no typed name; stations that were following a name show the shared name of
-their new complex, or their own if they are alone.
+A complex has one name [T-3288, T-3750]: its oldest typed name, else its oldest station's, bound stations or not
+(`game/complexLead.ts` `nameSource`, applied in `workers/stateRows.ts` `foldNames`; the model keeps each station's
+stored name). Every station bound to it shows it, so the map labels it once, and so does a station building nobody
+named; an unbound station shows its own name [T-3759, ui-inspectors.md "Renaming"], beside its building's name too.
+Far out (below zoom 13, where buildings' names start) a complex has one label, its complex's name, at its name with
+the most lines (`stationLabels.complexWide`); close in each station shows its own. Every label, panel and list
+takes a station's name from the one row `foldNames` makes. Where one name stands for the complex (Stations tab row,
+complex view title, diagram label) it is the complex's name (`complexTitle`); a complex of one station goes by what
+that station shows. A splitting or merging complex changes no typed name; bound stations show the name of their new
+complex, or their own stored one if they are alone.
 
 **Station buildings on the map** [T-2219, `map/buildingFloors.ts` drawing what `map/buildingNet.ts`
 works out in the clock worker, the inside's geometry `game/buildingLayout.ts`; the tool and panel in
@@ -589,7 +596,8 @@ works out in the clock worker, the inside's geometry `game/buildingLayout.ts`; t
   platforms spilling first; red when the hall is full. A member's side turns red only when it is past
   its room and the hall is full; zoomed out a member's dot reads its fullest side against its own room
   plus an even share of the hall.
-- **The name**: one label for the building, its name, and its stations' own names go. From zoom 14
+- **The name**: one label for the building, its name (the complex's when the player gave it none, T-3750),
+  and its stations' own names go. From zoom 14
   it sits in the middle of the cross-hall, dark and bold on the floor in both themes, when the
   building's short side on screen is at least the name's width plus 24 px; otherwise below the floor
   (right of it when the floor is taller than wide on screen). Placed before the stations' names.
@@ -640,7 +648,11 @@ works out in the clock worker, the inside's geometry `game/buildingLayout.ts`; t
   every zoom, so the faster one is drawn passing. Each direction of a line has one phase while the
   timetable's holds assume each direction's own (track-and-service.md 6.2), so in one direction a
   drawn express can catch a local between stations; it is then held behind it to the next station
-  where the local stops on passing tracks, and passes there. A held train is drawn late in its own run (`lag` per trip, an attribute on the
+  where the local stops on passing tracks, and passes there. A train standing on an outer track waits
+  there for a faster train its timetable has pass it first while that one is drawn late [T-3346,
+  `waitForPassing`]: it takes that train's lag, as far as its stand allows, so the two keep their
+  timetable's order and most of the time between them (a local due out 93 s after its express leaves
+  about 72 s after the drawn one, both making the lag up). A held train is drawn late in its own run (`lag` per trip, an attribute on the
   GPU), so it keeps its stops and speeds and waits outside a station where the train ahead stands;
   once clear it makes the lag up at 0.3 s a game second, drawn up to 30% faster than its timetable.
   A train still held when its next trip is due takes that trip late by the rest. At most 20 minutes
@@ -977,7 +989,8 @@ those who got on, less the load carried on.
   day's trips hold at the rated load (160 a car), the line panel's Average load for one stretch, the trips counted
   from the boarding account for the day shown (the average day 5 weekdays, a Saturday and a Sunday
   over 7), able to pass 100% up to crush's 150% [T-2186], no row until the account answers or where no trips run [T-2007];
-  and on track at capacity "Track at capacity at high demand" in red [T-819]. Whatever the display [T-473], the tag also carries one row
+  and on track at capacity in the period in force "Track at capacity in the morning peak" (at midday, in the evening
+  peak, in the evening, at night; T-3542) in red [T-819]. Whatever the display [T-473], the tag also carries one row
   for the level at that point (an up and down arrow, then "+1" on its Level colour) and
   the speed limit beside it (two right chevrons, then "120 km/h" on its Speed colour) [T-2007], each colour at
   half strength behind dark text, 2 px short at the bottom so rows' colours leave a gap

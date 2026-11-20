@@ -13,6 +13,7 @@ import { setDemandFineSink, setGameOpened, setOpenedSink } from "../game/openedZ
 import { setHandOrderSink, takeHandOrder } from "../game/handOrder";
 import { setLineShapeSink, takeLineShapes } from "../game/lineShapeState";
 import { setNewHeadwaySink, takeNewHeadway } from "../game/newHeadway";
+import { bindNewStations } from "../game/stationBinding";
 import { setHiddenLinesSink, takeHiddenLines } from "../game/lineVisibility";
 import { hiddenZones, setGameStart } from "../game/realms";
 import { home } from "../game/home";
@@ -26,14 +27,15 @@ import { demandByDay, demandView, marketIn, platformTransfers, roughZones, zoneV
 import { linesPending } from "../game/lineFigures";
 import { accountVersion, packArrivals, packRiders } from "../game/boarding";
 import { ask, designSpeed, guideFinished, lineDraft, marketOff, selection, tool } from "../game/ui";
-import { flipSites, rightHand, say, setEditSink, world, worldIsRows } from "../game/world";
-import type { LineInput, LineStats, StationInput, TrackEdge, TrackNode, WorldView } from "../game/types";
+import { afterStopEdits, flipSites, rightHand, say, setEditSink, stopsQueued, world, worldIsRows } from "../game/world";
+import type { LineInput, LineStats, RowFigs, StationInput, TrackEdge, TrackNode, WorldView } from "../game/types";
 import type { ClockLine, ClockState, EditOp, FromClock, NetworkSnapshot, PiInput, RouteAsk, StationAt, ToClock } from "./protocol";
 import { anchorVersion } from "../map/anchorVersion";
 import { mergeNet, type NetworkBuffers } from "../map/network";
 import { bandTry, perfOff } from "../perfFlags";
 import { anchor, anchorWanted, EARTH_C, HOME_ANCHOR, makeAnchor, setAnchor, type Anchor } from "../map/geo";
 import { loadFailText } from "../game/loadText";
+import { noteOpenFailure, openedFine } from "../game/openFailures";
 import { decodeSave, isDamagedError, isUncheckedError, readStored, writePending, type GuideSave, type NewGameSpec, type PendingLoad, type SaveSlot } from "./saveFile";
 import type { CloudContext } from "./cloud";
 import type { FrameSpec } from "../game/frame";
@@ -48,13 +50,19 @@ import { addTerrainGrid, dropTerrainGrids, groundNet, setTerrainIndex } from "..
 import { letterOf } from "../game/lineLetter";
 
 /** Text from the clock worker: it sends message keys (docs/localization.md "Workers"), worded here; anything else as it is. */
+/** T-3542: a line of four or five rows' figures (`ClockLine.rows`) as the panels read them. */
+function rowFigsOf(r: NonNullable<ClockLine["rows"]>): RowFigs {
+  const n = r.set.length, f = (k: number) => Array.from({ length: n }, (_, i) => r.figs[i * 5 + k] ?? 0);
+  return { roundTrip: f(0), trains: f(1), delay: f(2), tph: f(3), restTph: f(4), auto: r.auto ?? null, weekend: r.weekend };
+}
+
 export function workerText(s: string): string;
 export function workerText(s: string | undefined): string | undefined;
 export function workerText(s: string | undefined): string | undefined {
   return s && /^(clockWorker|issues|loadText)\.[A-Za-z]+$/.test(s) ? t(s as MessageKey) : s;
 }
 
-export const saveSlotsState = signal<Omit<Extract<FromClock, { kind: "saveSlots" }>, "kind">>({ slots: [], active: "autosave", writable: true, at: 0, backups: [] });
+export const saveSlotsState = signal<Omit<Extract<FromClock, { kind: "saveSlots" }>, "kind">>({ slots: [], active: "autosave", game: 0, writable: true, at: 0, backups: [] });
 /** When the game was last saved by hand in this page (T-1251). */
 export const savedByHand = signal<number | null>(null);
 
@@ -75,6 +83,8 @@ export function manageSaveSlot(action: Extract<ToClock, { kind: "saveSlot" }>["a
   if (action === "delete" && key && key === saveSlotsState.peek().active && current?.running) {
     return void current.leave(undefined, toStartMenu, { kind: "saveSlot", action, key });
   }
+  // T-3731: a save waits for the stop clicks still being sent, so it holds them
+  if (stopsQueued.peek() > 0) return void afterStopEdits().then(() => current?.post({ kind: "saveSlot", action, key, name }));
   current?.post({ kind: "saveSlot", action, key, name });
 }
 
@@ -89,8 +99,9 @@ export function onAccountGone(f: () => void) { accountGone = f; }
 export const clockRunning = () => !!current?.running;
 
 export const clockWorkerStatus = signal("loading");
-/** T-2124: counts the games loaded into the worker (each `loaded`), so per-game page state starts again */
-export const gamesLoaded = signal(0);
+/** T-3734: the stamp of the game in hand, `loaded`'s `game` (the worker's load count): per-game page state starts
+ * again when it moves (T-2124), and work taken under one stamp is dropped under another (T-3731's stop clicks) */
+export const gameStamp = signal(0);
 /** The newest network snapshot (what demand runs on); null until the worker has started. */
 const networkSnapshot = signal<NetworkSnapshot | null>(null);
 
@@ -263,7 +274,7 @@ function toWorld(s: ClockState): WorldView {
     .map((n) => {
       let v = stationViews.get(n);
       if (!v) stationViews.set(n, v = {
-        id: String(n.id), num: n.id, name: n.name, lng: n.lng, lat: n.lat, x: n.x, y: n.y, level: n.level as any, length: n.platform, built: n.stationBuilt, off: n.stationOff, upgrades: n.upgrades, heading: n.heading, ...(n.named ? { named: true as const } : {}), ...(n.line ? { line: n.line } : {}), ...(n.port ? { port: n.port } : {}), ...(n.kind && n.kind >= 2 ? { tram: true as const } : {}),
+        id: String(n.id), num: n.id, name: n.name, lng: n.lng, lat: n.lat, x: n.x, y: n.y, level: n.level as any, length: n.platform, built: n.stationBuilt, off: n.stationOff, upgrades: n.upgrades, heading: n.heading, ...(n.fare ? { fare: n.fare } : {}), ...(n.named ? { named: true as const } : {}), ...(n.own ? { unbound: true as const } : {}), ...(n.hub !== undefined ? { hub: n.hub } : {}), ...(n.line ? { line: n.line } : {}), ...(n.port ? { port: n.port } : {}), ...(n.kind && n.kind >= 2 ? { tram: true as const } : {}),
         ...(n.one ? { one: n.one } : {}), ...(n.oneHeading !== undefined ? { oneHeading: n.oneHeading } : {}), ...(n.onePlatform ? { onePlatform: true as const } : {}),
       });
       return v;
@@ -281,6 +292,7 @@ function toWorld(s: ClockState): WorldView {
       ...(l.planStops ? { planStops: l.planStops.map(String), stopStart: l.stopStart ?? 0 } : {}),
       ...(l.group ? { group: l.group, groupName: l.groupName, groupSymbol: l.groupSymbol, groupColour: l.groupColour } : {}),
       tph: { high: l.tph[0], medium: l.tph[1], low: l.tph[2] },
+      tphP: l.tphP,
       ...(l.twinOf !== undefined ? { twinOf: String(l.twinOf) } : {}),
     });
     return v;
@@ -324,14 +336,21 @@ function toWorld(s: ClockState): WorldView {
       endTurns: l.endTurns,
       oneWayAt: Object.fromEntries(Array.from({ length: l.ways.length >> 1 }, (_, k) => [String(l.ways[2 * k]), l.ways[2 * k + 1]])),
       ...(l.backStops?.length ? { backStops: l.backStops.map(String) } : {}),
+      ...(l.oneStops?.length ? { oneStops: l.oneStops.map(String) } : {}),
       hand: l.hand,
       loop: l.loopKind === 1 ? "circle" : l.loopKind === 2 ? "balloon" : null, // i18n-ignore
       oneWay: l.oneWay,
       limit: l.limit,
+      ...(l.fareDist ? { fareDist: true as const } : {}),
       ...(l.weekend ? { weekend: l.weekend } : {}),
       ...(l.restTph ? { restTph: l.restTph } : {}),
       ...(l.pairs ? { pairs: l.pairs } : {}),
       ...(l.twinOf !== undefined ? { twinOf: String(l.twinOf) } : {}),
+      periods: l.periods,
+      periodsOwn: l.periodsOwn,
+      hours: l.hours,
+      hoursOwn: l.hoursOwn,
+      ...(l.rows ? { rows: rowFigsOf(l.rows) } : {}),
       ...(l.bus ? { bus: l.bus } : {}),
     };
   }
@@ -347,6 +366,8 @@ function toWorld(s: ClockState): WorldView {
   }
   return {
     version: s.version,
+    periods: s.periods,
+    hours: s.hours,
     capacity: s.markers,
     fullTrack: (s.fullTrack ?? []).map((v) => {
       const m = new Map<number, { rho: number; tph: number }>();
@@ -719,9 +740,10 @@ export class ClockClient {
     if (!choice.slot) try { slot = localStorage.getItem("anitabuilder-save-slot") || slot; } catch { /* storage unavailable */ }
     const backupMs = Number(q.get("backupMs")) || undefined;
     const readFails = q.get("debug") === "1" ? Number(q.get("readFails")) || undefined : undefined;
+    const loadPanic = q.get("debug") !== "1" ? undefined : q.get("loadPanic") === "1" ? true : q.get("loadPanic") === "late" ? "late" as const : undefined;
     this.patchMode = q.get("patch") ?? "1";
     // (first, before any message posted ahead of the start)
-    this.waiting.unshift([{ kind: "init", pack: dataUrl(this.cityId), terrain: TERRAIN_BASE, fresh, testPage: this.testPage, slot, newSlot: choice.newSlot, backupMs, game: choice.game, pending: choice.pending, patch: this.patchMode, guide: !guideFinished.peek(), bandMode: bandTry(), readFails, heapStep: heapStep() } satisfies ToClock, choice.game?.real ? [choice.game.real] : []]);
+    this.waiting.unshift([{ kind: "init", pack: dataUrl(this.cityId), terrain: TERRAIN_BASE, fresh, testPage: this.testPage, slot, newSlot: choice.newSlot, backupMs, game: choice.game, pending: choice.pending, patch: this.patchMode, guide: !guideFinished.peek(), bandMode: bandTry(), readFails, loadPanic, heapStep: heapStep() } satisfies ToClock, choice.game?.real ? [choice.game.real] : []]);
     // T-2802: the page's parse of the outlines, copied, in place of the worker's own fetch and parse
     void packedOutlines().then((packed) => this.post({ kind: "outlines", packed }));
   }
@@ -764,18 +786,21 @@ export class ClockClient {
 
   constructor(cityId = HOME_CITY) {
     this.cityId = cityId;
-    setEditSink((op, early, time) => this.edit(op, early, time));
+    setEditSink((op, early, game, time) => this.edit(op, early, game, time));
     setOpenedSink((zones) => this.post({ kind: "opened", zones }));
     setDemandFineSink((zones, built) => this.post({ kind: "demandFine", zones, built }));
     setHandOrderSink((kind, ids) => this.post({ kind: "listOrder", list: kind === "lines" ? 0 : 1, ids }));
     setLineShapeSink((line, shape) => this.post({ kind: "lineShape", line, shape }));
     setHiddenLinesSink((lines) => this.post({ kind: "hideLines", lines }));
     setNewHeadwaySink((seconds) => this.post({ kind: "newHeadway", seconds }));
+    // T-3759: the player's setting for new stations, again on each change (a worker with no game yet drops it,
+    // so each load sends it too)
+    effect(() => this.post({ kind: "bindNew", on: bindNewStations.value }));
     current = this;
     if (moddedWhy.length) this.post({ kind: "modded", why: moddedWhy });
     // The worker settles money from the clock (T-028, T-284): tell it each time the
     // clock is set, paused, resumed or sped up.
-    const sendClock = () => this.post({ kind: "clock", t: clock.now(), rate: clock.ticking ? clock.rate() : 0, at: performance.timeOrigin + performance.now(), game: this.game });
+    const sendClock = () => this.post({ kind: "clock", t: clock.now(), rate: clock.ticking ? clock.rate() : 0, at: performance.timeOrigin + performance.now(), game: gameStamp.peek() });
     clock.onChange(sendClock);
     sendClock();
     // Fare income from the riders (game/money.ts), whenever riders, fares or lines change.
@@ -927,7 +952,9 @@ export class ClockClient {
   }
 
   /** T-2657: write the autosave and wait for its mark (or 1.5 s) before the page reloads */
-  saveBeforeReload(): Promise<void> {
+  async saveBeforeReload(): Promise<void> {
+    // T-3731: the stop clicks still being sent first
+    await afterStopEdits();
     const from = saveSlotsState.peek().at;
     this.post({ kind: "flush" });
     return new Promise((done) => {
@@ -941,8 +968,6 @@ export class ClockClient {
   private worldBefore: WorldView | null = null;
   /** `?new=1`, `?synth=1` or `?demandTest=1`: no autosave until a copy is saved (T-320) */
   private testPage = false;
-  /** the worker's game the clock messages are for (`loaded`'s `game`, T-715) */
-  private game = 0;
   private forgetSent = () => {};
   private resendFigures = () => {};
   /** T-895: the next game loaded was opened by the player, so the camera fits its network (`fitView`) */
@@ -958,7 +983,9 @@ export class ClockClient {
     // a worker that never started has no game to keep
     if (!this.worker) return then();
     this.onLeft = then;
-    this.post(instead ?? { kind: "leave", pending });
+    // T-3731: the game saved on leaving holds the stop clicks still being sent
+    if (stopsQueued.peek() > 0) void afterStopEdits().then(() => this.post(instead ?? { kind: "leave", pending }));
+    else this.post(instead ?? { kind: "leave", pending });
   }
 
   get running() { return !!this.worker; }
@@ -1241,6 +1268,7 @@ export class ClockClient {
       case "loaded":
         // the game now in the worker may be in the other frame (T-125); first, before anything reads positions
         setWorldFrame(msg.frame);
+        this.post({ kind: "bindNew", on: bindNewStations.peek() });
         this.lastLoad = { from: msg.from, converted: !!msg.converted };
         this.fitState = this.fitNext && msg.from !== "new" && !msg.error;
         this.fitNext = false;
@@ -1258,14 +1286,20 @@ export class ClockClient {
         if (msg.reason !== "rebuilt") flipSites.value = null;
         tool.value = "select";
         lineDraft.value = { line: null, stops: [] };
-        // T-715: the clock the hold above sent is the old game's, which the worker ignores
-        this.game = msg.game;
         this.forgetSent();
         if (msg.reason === "rebuilt") this.resendFigures(); // T-2848: only here; a real load would send the last game's
-        gamesLoaded.value++;
+        // T-715: the clock the hold above sent is the old game's, which the worker ignores
+        gameStamp.value = msg.game;
         clock.set(msg.clock);
         if (msg.from === "file") say(t("clockClient.loaded", { day: Math.floor(msg.clock / 86400) }));
         if (msg.from === "new" && !msg.error) say(t("clockClient.newGame"));
+        if (!msg.error && msg.from === "autosave") openedFine(msg.slot);
+        break;
+      case "openFailed":
+        // T-3773: the worker holds no slot now; the start menu says why, and the saved game is as it was
+        console.warn("clock worker: a game did not open, back to the start menu:", msg.why ?? msg.error); // i18n-ignore (the worker logged the error)
+        noteOpenFailure({ from: msg.from, slot: msg.slot, name: msg.name, error: msg.error, why: msg.why });
+        toStartMenu();
         break;
       case "left": {
         const then = this.onLeft;
@@ -1285,7 +1319,7 @@ export class ClockClient {
       }
       case "saveSlots": {
         const before = saveSlotsState.value;
-        saveSlotsState.value = { slots: msg.slots, active: msg.active, writable: msg.writable, at: msg.at, reason: workerText(msg.reason), error: workerText(msg.error), backups: msg.backups, newer: msg.newer, viewing: msg.viewing };
+        saveSlotsState.value = { slots: msg.slots, active: msg.active, game: msg.game, writable: msg.writable, at: msg.at, reason: workerText(msg.reason), error: workerText(msg.error), backups: msg.backups, newer: msg.newer, viewing: msg.viewing };
         lastSaved.value = msg.at;
         if (msg.at > 0 && !this.testPage) void keepStorage(); // T-1214: a slot is written
         // a test page does not make its slot the one the next page opens, until it changes (T-320)
@@ -1433,21 +1467,23 @@ export class ClockClient {
   }
 
   /** Send an edit; the promise resolves with the worker's answer. `early` "rows": a stop click's (T-2766), answered
-   * once the world holds it, its network a moment after the clicks stop. */
-  edit(op: EditOp, early: boolean | "rows" = false, time?: { at: number; lead: number }): Promise<EditAnswer> {
-    const seq = ++this.seq;
+   * once the world holds it, its network a moment after the clicks stop. `game`: the `gameStamp` it was made under,
+   * for an edit sent later than made (T-3734). `time`: co-op, the game time and lead of the host's edit, for a guest's
+   * replay of it. */
+  edit(op: EditOp, early: boolean | "rows" = false, game?: number, time?: { at: number; lead: number }): Promise<EditAnswer> {
+    const seq = ++this.seq, stamp = game === undefined ? {} : { game };
     if (time) {
-      this.post({ kind: "edit", seq, op, at: time.at, lead: time.lead });
+      this.post({ kind: "edit", seq, op, at: time.at, lead: time.lead, ...stamp });
       this.sent.set(seq, { what: op.op, at: performance.now() });
       return new Promise((res) => this.pending.set(seq, res));
     }
     if (early === "rows") {
       this.stopsOut++;
       this.lastStopSent = performance.now();
-      this.post({ kind: "edit", seq, op, rows: true });
+      this.post({ kind: "edit", seq, op, rows: true, ...stamp });
       return new Promise((res) => this.pending.set(seq, (a) => { this.stopsOut--; this.lastStopAt = performance.now(); res(a); }));
     }
-    this.post(early ? { kind: "edit", seq, op, early } : { kind: "edit", seq, op });
+    this.post(early ? { kind: "edit", seq, op, early, ...stamp } : { kind: "edit", seq, op, ...stamp });
     this.sent.set(seq, { what: op.op, at: performance.now() });
     return new Promise((res) => this.pending.set(seq, res));
   }

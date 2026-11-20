@@ -19,7 +19,7 @@
 
 import { signal } from "@preact/signals";
 import { t } from "../i18n";
-import { coopLoad, exportForShare, gamesLoaded, setCoopGameHooks, type EditAnswer } from "../workers/clockClient";
+import { coopLoad, exportForShare, gameStamp, setCoopGameHooks, type EditAnswer } from "../workers/clockClient";
 import type { EditOp } from "../workers/protocol";
 import { clock, SPEEDS } from "./clock";
 import { openTransport, resetTransport, type CoopTransport } from "./coopTransport";
@@ -81,7 +81,7 @@ function write() {
 function post(m: Msg) {
   channel?.send(m);
 }
-const loaded = () => gamesLoaded.peek() > 0;
+const loaded = () => gameStamp.peek() > 0;
 
 // ---- the host ----
 
@@ -350,7 +350,7 @@ export function startCoop() {
   if (stored) begin(stored);
   else if (new URLSearchParams(location.search).get("coop") === "join") joinGame();
   // the game loaded: a host that reloaded for a sync tells its guests to load it too; a guest asks for the edits since
-  gamesLoaded.subscribe((n) => {
+  gameStamp.subscribe((n) => {
     if (!n || !me) return;
     if (me.role === "host" && resyncWhenLoaded) {
       resyncWhenLoaded = false;

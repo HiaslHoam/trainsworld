@@ -70,18 +70,19 @@ export function addEntry(to: Omit<DayLedger, "day">, e: Omit<DayLedger, "day">, 
   to.points = (to.points ?? 0) + sign * (e.points ?? 0);
 }
 
-/** T-3543, T-3588: the headways new lines start with (seconds at high, medium and low demand), by kind of line */
-export type Headways = [number, number, number];
+/** T-3543, T-3588: the headways new lines start with, by kind of line: seconds at high, medium and low demand, or
+ * (T-3767, set from a line of four or five rows) one per period, morning to night (game/newLine.ts `headwaysIn`) */
+export type Headways = number[];
 export type NewHeadways = { rail?: Headways; tram?: Headways; fast?: Headways; bus?: Headways; ferry?: Headways };
 /** The kinds of line a default headway is kept for (T-3703: bus and ferry too) */
 export const NEW_HEADWAY_KINDS = ["rail", "tram", "fast", "bus", "ferry"] as const;
-const isHeadways = (v: unknown): v is Headways => Array.isArray(v) && v.length === 3 && v.every((s) => typeof s === "number" && Number.isFinite(s) && s >= 0);
+export const isHeadways = (v: unknown): v is Headways => Array.isArray(v) && (v.length === 3 || v.length === 5) && v.every((s) => typeof s === "number" && Number.isFinite(s) && s >= 0);
 /** A header's `newHeadway` read back: the kinds it holds well-formed, none from anything else. */
 export function cleanNewHeadways(v: unknown): NewHeadways {
   const out: NewHeadways = {};
   if (v && typeof v === "object" && !Array.isArray(v)) {
     const o = v as Record<string, unknown>;
-    for (const k of NEW_HEADWAY_KINDS) if (isHeadways(o[k])) out[k] = [o[k][0], o[k][1], o[k][2]];
+    for (const k of NEW_HEADWAY_KINDS) { const h = o[k]; if (isHeadways(h)) out[k] = [...h]; }
   }
   return out;
 }
@@ -113,7 +114,7 @@ export interface SaveHeader {
   /** T-2926: tram cars owned; absent for none */
   fleetTram?: number;
   /** fare curve (game/fareCurve.ts): its first stretch as a base and rate, and its nodes (none in a save from before T-883) */
-  fares: { base: number; perKm: number; nodes?: [number, number][]; scales?: Record<string, number>; baseline?: string; basis?: "usd"; income?: number; hsr?: number; ferry?: number; bus?: number; transfer?: number; ref?: string; lines?: Record<string, number> };
+  fares: { base: number; perKm: number; nodes?: [number, number][]; scales?: Record<string, number>; baseline?: string; basis?: "usd"; income?: number; hsr?: number; ferry?: number; bus?: number; transfer?: number; ref?: string; lines?: Record<string, number>; zones?: { id: number; name: string; prices: number[]; off?: boolean }[]; zoneNext?: number };
   /** recent days, oldest first (today last) */
   ledger: DayLedger[];
   /** recent hours, oldest first (T-447; absent in older saves) */
@@ -121,7 +122,7 @@ export interface SaveHeader {
   /** T-531: the same two per region (a zone id; "" outside every zone); absent in older saves */
   regions?: Record<string, { ledger: DayLedger[]; hours: HourLedger[] }>;
   /** T-2787: each line's recent days of money, by line id: [day, fares, running cost] flattened, US$M,
-   * oldest first (the last 8 days); absent in older saves, which start with no history */
+   * oldest first (the last month); absent in older saves, which start with no history */
   lineDays?: Record<string, number[]>;
   /** T-685: each region's star, the game second it was earned; absent in older saves */
   stars?: Record<string, number>;
@@ -450,6 +451,8 @@ export interface SyncRecord {
   error?: string;
   /** T-3395: the slot's `at` whose bytes the account refused as damaged: not sent again until the slot changes */
   refused?: number;
+  /** T-3788: the account rev that failed to load in place: not fetched again until the account has a newer one */
+  badRev?: number;
 }
 export const ORIGINAL_SLOT = "autosave";
 export const ORIGINAL_NAME = "Original game"; // i18n-ignore: a slot's saved name
@@ -727,6 +730,12 @@ const UNREADABLE_PREFIX = "unreadable-";
 /** T-743, T-3395: where slot `slot`'s copy written at `at` is kept aside when it cannot be read (out of the
  * slot list, the tiers and their trimming); deleted with the slot. */
 export const unreadableKey = (slot: string, at: number) => `${UNREADABLE_PREFIX}${at}:${slot}`;
+
+/** T-3774: how many copies are kept aside as unreadable, across every slot (a count for feedback reports). */
+export async function countUnreadable(): Promise<number> {
+  const keys = await req((await store("readonly")).getAllKeys());
+  return keys.filter((k) => typeof k === "string" && k.startsWith(UNREADABLE_PREFIX)).length;
+}
 
 export async function deleteSlot(key: string): Promise<void> {
   const s = await store("readwrite");

@@ -30,6 +30,8 @@ import { t, tNumber, type MessageKey } from "../i18n";
 import { LanguageSelect } from "./LanguageSelect";
 import { SideRow } from "./SideSwitch";
 import { SettingsSearch } from "./SettingsSearch";
+import { bindNewStations, setBindNew } from "../game/stationBinding";
+import { edit, world } from "../game/world";
 
 const THEME_NAME: Record<Theme, MessageKey> = { pink: "settingsTab.pink", blue: "settingsTab.blue", green: "settingsTab.green" };
 const SHADE_NAME: Record<Shade, MessageKey> = { light: "settingsTab.light", dark: "settingsTab.dark" };
@@ -194,6 +196,9 @@ export function SettingsTab() {
         <Check checked={d.zoomButtons} onChange={(v) => setDisplay("zoomButtons", v)}>
           {t("settingsTab.zoomButtons")}
         </Check>
+        <Check checked={d.legacyTime} onChange={(v) => setDisplay("legacyTime", v)}>
+          {t("settingsTab.legacyTime")}
+        </Check>
       </div>
       <div class="h">{t("settingsTab.theme")}</div>
       <div class="stack">
@@ -293,18 +298,37 @@ function Slider({ label, min, max, step, value, tip, percent: pct, set }: { labe
   );
 }
 
+/** T-3759, T-3794: new stations named after their complex or not; changing it asks about the existing
+ * stations too (one undo). No, Escape and a click outside all leave them as they are. */
+function bindNew(on: boolean) {
+  setBindNew(on);
+  const stations = world.peek()?.save.stations.filter((s) => !s.port) ?? [];
+  if (on) {
+    if (!stations.some((s) => s.unbound)) return;
+    ask.value = { text: t("settingsTab.bindAllQuestion"), yes: t("settingsTab.bindAll"), no: t("settingsTab.bindNewOnly"), run: () => void edit({ op: "bindAll" }) };
+    return;
+  }
+  const bound = stations.filter((s) => !s.unbound);
+  if (!bound.length) return;
+  ask.value = { text: t("settingsTab.unbindAllQuestion"), yes: t("settingsTab.unbindAll"), no: t("settingsTab.bindNewOnly"), run: () => void edit({ op: "unbindAll", nodes: bound.map((s) => s.num), names: bound.map((s) => s.name) }) };
+}
+
 /** T-728: the game's mode; a normal game can be made a sandbox once, after a confirmation, never back. */
 function GameMode() {
   const m = moneyState.value;
   const sandbox = m?.mode === "sandbox";
-  const busOneWay = (
+  // the player's own, in every game and before one is loaded
+  const playerChecks = (
     <div class="checks">
+      <Check checked={bindNewStations.value} onChange={bindNew}>
+        {t("settingsTab.bindNew")}
+      </Check>
       <Check checked={display.value.busOneWay} onChange={(v) => setDisplay("busOneWay", v)}>
         {t("settingsTab.busOneWay")}
       </Check>
     </div>
   );
-  if (!m) return <><div class="h">{t("settingsTab.game")}</div>{busOneWay}</>;
+  if (!m) return <><div class="h">{t("settingsTab.game")}</div>{playerChecks}</>;
   return (
     <>
       <div class="h">{t("settingsTab.game")}</div>
@@ -323,7 +347,7 @@ function GameMode() {
           <button class="btn text" data-guide-restart onClick={() => saveGuide({ done: 0 })}>{t("settingsTab.startAgain")}</button>
         </div>
       )}
-      {busOneWay}
+      {playerChecks}
     </>
   );
 }

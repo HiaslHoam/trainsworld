@@ -328,7 +328,9 @@ shows an earlier edit's figures [T-1276]; each button's hover names the train
   level's times of day in the line's local time, the same every kind of day (T-2335), from the period table in
   `game/periods.ts`: "High demand period: 06:00-20:00", "Medium demand period: 20:00-24:00", "Low demand
   period: 00:00-06:00" (hours as the clock writes them, `hourSpan`, T-2271; `levelTimes`) [T-406, T-1536,
-  T-1797]; on a
+  T-1797]; a line set in four or five periods (T-3542, the schedule panel's Periods) has a row each, Rush or
+  Morning, Midday, (Afternoon,) Evening and Night under "Period", each hover its hours ("Rush: 06:00-10:00,
+  16:00-20:00"), the row now bold, weekdays only; on a
   running line one dot before the name of each level that runs trains (none for a level with 0 trains or no headway, T-1783) grades the level on the kind of day the clock is on [T-1671], by the
   load past the rated load, as in Trains to add [T-2236]: each interval's load is the busiest hour's mean load
   of the trains on it (the fuller direction) over the level's periods (High is its three periods, 6-10, 10-16
@@ -424,7 +426,9 @@ The stops (above Schedule while being edited [T-670]),
   flat crossings on the route** [T-629, `TrackApi.line_marks`] as small marks on the diagram's bar between the
   two stops they lie between, spread evenly in the gap (the diagram is not to scale): a white diamond for a
   junction with no flyover and no station, a cross for a flat crossing, each with a hover naming it and
-  the lines that use or cross it ("Flat crossing near Harbour", "Crosses Cross"); **in the Traffic
+  the lines that use or cross it ("Flat crossing near Harbour", "Crosses Cross"), only where something
+  could hold the line's trains: a junction move of its own that crosses another move a line runs, a
+  crossing with a line on its other edge [T-3745]; **in the Traffic
   track display** [T-1272] (not while stops are edited) each stretch of the diagram's bar is as wide as
   its riders over the day shown (both directions, the map's purpose filter, `dailyRiders`; after an
   edit, until demand has riders for the new stops, the last figures carried onto them by station or
@@ -874,16 +878,24 @@ order, kept and dropped as the Lines tab's is [T-1813]. Riders follows the rider
   station on screen at zoom 13 or closer; with nothing else to offer it says "No other name is
   suggested here." **A name the player typed stays** [T-2683]: a rename or a pick of the cycle button
   marks the station's name as the player's (saved), and nothing renames it afterwards (not adding a
-  station or a line to its complex, a complex splitting or merging, loading). **A complex has one name
-  by default** [T-3288]: every station nobody typed a name for shows the name of the oldest of them
-  (`nameSource`; the model keeps each station's own, so a split complex gives them back), a station
-  joining takes it at once, and a station with a typed name keeps its own. Renaming from the complex
-  view (the title of an untyped station, the cycle button) or from a Stations tab row of an untyped
-  complex sets that oldest station's name with no typed flag (`stationName`), so the whole complex
-  follows; opened on its own from the list, or typed on a station that already has a typed name, a rename
-  names that station alone. In the Stations tab row and the diagram a complex goes by its member with
-  a typed name, else the one with the most lines (`game/complexLead.ts`), which with no typed name is
-  the shared name; the map labels every distinct name. A line group's name
+  station or a line to its complex, a complex splitting or merging, loading). **Stations bound to their
+  complex's name** [T-3288, T-3750, T-3759]: the complex's name is its oldest typed name, else its oldest
+  station's (`nameSource`, over every station of it), and every bound station shows it, as does a
+  station building nobody named (the part before any slash); an unbound station shows a name of its
+  own. The model keeps each station's stored name, so a split complex gives them back, and a bound
+  station joining takes the complex's name at once. Renaming a bound station (its panel, the cycle
+  button, a Stations tab row with "Show stations separately") renames the complex; renaming an unbound
+  one names it alone (alone in its complex, its stored name too, so a complex it forms later is called
+  that). The complex view's title, and a Stations tab row of a complex, show and rename the complex's
+  name, which unbound stations keep out of (the worker resolves every rename: `renameStation`,
+  `renameComplex` in `workers/clock.worker.ts`). A station opened on its own from its complex's list,
+  in a complex of several, has a toggle beside its name (link icon, hover "Use the complex's name",
+  lit while bound): unbinding shows its stored name again, binding shows the complex's; each is one
+  undo. New stations start bound while Settings, Game "Name new stations after their complex" is ticked
+  (on by default; the player's own, remembered in the browser and used in every game,
+  `DisplaySettings.bindNew`); a change applies to stations placed from then on. Ticking it while some stations are unbound asks "Name existing stations after their
+  complex too?" ("Rename all stations" binds every station, one undo; "Only new stations" or Escape
+  leaves them). The map labels every distinct name a complex's stations show. A line group's name
   typed in its title stays even when it equals its first line's name.
 
 ## The complex map
@@ -1145,8 +1157,8 @@ title is "Trip" with no line under it naming the ends: the map marks them [T-125
   station, each line ridden with its chip and the station it goes to, each change and walk, the
   walk from the last station; each row's minutes its wait and ride; a ride access [T-374] reads
   "Drive to" with its drive minutes; the hovers give real minutes only), the fare (with any
-  transfer fares [T-1801], its hover the base fare and, where one is set, the transfer fare at each
-  change), and on a route
+  transfer fares [T-1801], none on a change inside a fare zone run [T-3784], its hover the base
+  fare and, where one is paid, the transfer fare at each change), and on a route
   that starts with a drive to the station a **Car** row [T-915] (dollars: the car's cost per trip
   and per km on the road to the station plus any paid parking there, its hover the two apart),
   where full trains add anything a **Crowding** row (the rides' perceived minutes beyond their

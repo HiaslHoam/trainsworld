@@ -93,12 +93,15 @@ impl TrackApi {
     pub fn nodes_info(&self) -> Vec<f64> {
         let n = &self.w.net;
         let mut out = vec![];
+        let busy = crate::track::capacity::conflict_nodes(n, &self.w.svc.lines);
         for k in 0..n.node_count() as u32 {
             if !n.node_ok(k) {
                 continue;
             }
             let i = k as usize;
-            let flags = n.node_flying[i] as u8 | (crate::track::capacity::junction_crosses(n, k) as u8) << 1 | n.node_unusable(k) << 2;
+            // T-3745: a built junction shows only where two moves some line runs cross; a blueprint one always
+            let crosses = crate::track::capacity::junction_crosses(n, k) && (n.built_ports(k) < 3 || busy.binary_search(&k).is_ok());
+            let flags = n.node_flying[i] as u8 | (crosses as u8) << 1 | n.node_unusable(k) << 2;
             out.extend([k as f64, n.node_x[i], n.node_y[i], n.node_level[i] as f64, n.node_ports[i].n as f64, n.built_ports(k) as f64, flags as f64, n.node_platform[i] as f64, n.node_built[i] as u8 as f64, n.node_heading[i]]);
         }
         out
@@ -109,6 +112,7 @@ impl TrackApi {
     pub fn crossings_info(&self) -> Vec<f64> {
         let n = &self.w.net;
         let mut out = vec![];
+        let used = crate::track::capacity::edges_in_use(&self.w.svc.lines);
         for c in &n.crossings {
             let (kind, level) = match c.kind {
                 CrossKind::Flat(l) => (0.0, l as f64),
@@ -116,6 +120,10 @@ impl TrackApi {
                 CrossKind::Overlap => continue,
             };
             let built = n.edge_built[c.e1 as usize] && n.edge_built[c.e2 as usize];
+            // T-3745: a built flat crossing shows only with a line on both its edges
+            if built && kind == 0.0 && !(used.binary_search(&c.e1).is_ok() && used.binary_search(&c.e2).is_ok()) {
+                continue;
+            }
             out.extend([c.x, c.y, kind, level, built as u8 as f64, n.crossing_trams(c.e1, c.e2) as f64]);
         }
         out
@@ -153,14 +161,15 @@ impl TrackApi {
             let ok = svc.map_or(false, |s| s.ok);
             let running = svc.map_or(false, |s| s.running);
             out.extend([l as f64, n.line_colour[i] as f64, ok as u8 as f64, running as u8 as f64, n.line_broken[i] as u8 as f64]);
-            out.extend(n.line_tph[i].iter().map(|&t| t as f64));
+            // per row (high, medium, low), each from its slot
+            out.extend(n.rows_of(n.line_tph[i]).iter().map(|&t| t as f64));
             out.push(n.line_cars[i] as f64);
             match svc.filter(|s| s.ok) {
                 Some(s) => {
                     out.push(s.runs[0].len);
-                    out.extend(s.round_trip);
-                    out.extend(s.trains.iter().map(|&t| t as f64));
-                    out.extend(s.delay);
+                    out.extend(n.rows_of(s.round_trip));
+                    out.extend(n.rows_of(s.trains).iter().map(|&t| t as f64));
+                    out.extend(n.rows_of(s.delay));
                     out.extend([n.line_dwell[i] as f64, n.line_turn[i] as f64, s.cars as f64]);
                 }
                 None => {
@@ -247,6 +256,28 @@ impl TrackApi {
     /// Where each stop is along a run's path, m (the train's middle when standing).
     pub fn line_stop_s(&self, line: u32, run: usize) -> Vec<f64> {
         self.w.svc.lines.get(line as usize).filter(|l| l.ok).map_or(vec![], |l| l.runs[run].stop_s.clone())
+    }
+    /// T-3758: per hop of a run (stop to stop in its order, as `line_stop_s`), the fare zone codes
+    /// (`StationData::fare`) of the stations its trains pass on the way without stopping there:
+    /// a count, then the codes. Empty for no such line; a bus or ferry passes none.
+    pub fn line_pass_fares(&self, line: u32, run: usize) -> Vec<u32> {
+        let Some(l) = self.w.svc.lines.get(line as usize).filter(|l| l.ok) else { return vec![] };
+        let (net, r) = (&self.w.net, &l.runs[run]);
+        let mut out = vec![];
+        for w in r.stop_idx.windows(2) {
+            let (a, b) = (w[0] as usize + 1, w[1] as usize);
+            let at = out.len();
+            out.push(0);
+            if a < b && b <= r.nodes.len() {
+                for &n in &r.nodes[a..b] {
+                    if net.is_station(n) && net.node_fare[n as usize] != 0 {
+                        out.push(net.node_fare[n as usize]);
+                    }
+                }
+            }
+            out[at] = (out.len() - at - 1) as u32;
+        }
+        out
     }
 
 }

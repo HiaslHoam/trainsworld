@@ -23,7 +23,7 @@ use super::lengths::{len_kernel, len_zero, scale_to, LenOut, LenSums, N_LEN};
 use super::lod::{self, Lod};
 use super::network::{Network, PERIODS, TRAM_CARS};
 use super::pack::{self, City};
-use crate::track::params::{LEVELS, PERIOD_HOURS, PERIOD_LEVEL};
+use crate::track::params::{PERIOD_HOURS, PERIOD_ROW};
 use std::sync::Arc;
 use wasm_bindgen::prelude::*;
 
@@ -75,30 +75,70 @@ pub(crate) fn check_fare_curve(knots: &[f32]) -> Result<(), String> {
 /// Gives `g` the fare curve `knots` (US$, `check_fare_curve`) over the straight line the ride
 /// edges and base fare already charge (perceived minutes, `fare_w` a dollar), with each route
 /// node's fare km.
-pub(crate) fn put_fare_curve(g: &mut Graph, knots: &[f32], hop_km: &[f32], fare_min: f32, per_km: f32, fare_w: f32) {
-    if knots.len() < 4 {
+pub(crate) fn put_fare_curve(g: &mut Graph, knots: &[f32], zones: &FareZones, hop_km: &[f32], fare_min: f32, per_km: f32, fare_w: f32) {
+    if knots.len() < 4 && zones.is_empty() {
         return;
     }
     g.fare_curve = FareCurve {
-        km: knots.iter().step_by(2).copied().collect(),
-        min: knots.iter().skip(1).step_by(2).map(|v| v * fare_w).collect(),
+        km: if knots.len() < 4 { vec![] } else { knots.iter().step_by(2).copied().collect() },
+        min: if knots.len() < 4 { vec![] } else { knots.iter().skip(1).step_by(2).map(|v| v * fare_w).collect() },
         base: fare_min,
         rate: per_km,
+        // T-3740: a zone price is never below the base fare charged
+        zones: FareZones { min: zones.min.iter().map(|v| (v * fare_w).max(fare_min)).collect(), ..zones.clone() },
     };
     g.rn_km = (0..g.rn_fare.len()).map(|r| hop_km.get(r).copied().unwrap_or(0.0)).collect();
 }
 
-/// Each ride edge's distance fare (`per_km` a fare km, perceived minutes) times its route node's
-/// multiplier in `mul` (T-1626; empty: all 1), the fare curve (`put_fare_curve`), and the base's
-/// multiplier per route node in `base_mul` (T-3578, each line's own; empty: all 1).
+/// T-3740: the fare zones of the demand stations, from `st` (one code per station given to
+/// `set_network`, `FareZones::st`) through the stations' merge `st_map`: a demand station takes
+/// the zone of the first given station merged into it that has one. Empty when `st` does not
+/// match or names no zone. T-3758: the route nodes' `dist` and `pass_off`/`pass` as given (route
+/// nodes are never merged), none while every line zones and none passes a station with a zone.
 #[allow(clippy::too_many_arguments)]
-pub(crate) fn put_fares(g: &mut Graph, knots: &[f32], hop_km: &[f32], mul: &[f32], base_mul: &[f32], fare_min: f32, per_km: f32, fare_w: f32) {
+pub(crate) fn demand_fare_zones(st_map: &[u32], n: usize, st: &[u32], off: &[u32], usd: &[f32], dist: &[u8], pass_off: &[u32], pass: &[u32]) -> FareZones {
+    if st.len() != st_map.len() || st.iter().all(|&c| c == 0) || off.is_empty() {
+        return FareZones::default();
+    }
+    let dist: Vec<bool> = if dist.iter().any(|&d| d != 0) { dist.iter().map(|&d| d != 0).collect() } else { vec![] };
+    let (pass_off, pass) = if pass.is_empty() { (vec![], vec![]) } else { (pass_off.to_vec(), pass.to_vec()) };
+    let mut out = vec![0u32; n];
+    for (i, &c) in st.iter().enumerate() {
+        let d = &mut out[st_map[i] as usize];
+        if *d == 0 {
+            *d = c;
+        }
+    }
+    FareZones { st: out, off: off.to_vec(), min: usd.to_vec(), dist, pass_off, pass }
+}
+
+/// T-3740: checks fare zones (`set_fare_zones`): areas' price offsets rising from 0 to the prices'
+/// count, prices finite and not below 0, each code's area among them and its zone from 1. T-3758:
+/// `dist` one per route node (`routes` of them) or none; `pass_off` one more than the route nodes,
+/// rising from 0 to the codes' count, or none with no codes; each passed code as a station's.
+pub(crate) fn check_fare_zones(st: &[u32], off: &[u32], usd: &[f32], dist: &[u8], pass_off: &[u32], pass: &[u32], routes: usize) -> Result<(), String> {
+    let areas = off.len().saturating_sub(1);
+    let code_ok = |c: u32| c == 0 || ((c >> 8) as usize >= 1 && (c >> 8) as usize <= areas && c & 255 >= 1);
+    let ok = (off.is_empty() || (off[0] == 0 && *off.last().unwrap() as usize == usd.len() && off.windows(2).all(|w| w[0] <= w[1])))
+        && usd.iter().all(|v| v.is_finite() && *v >= 0.0)
+        && st.iter().all(|&c| code_ok(c))
+        && (dist.is_empty() || dist.len() == routes)
+        && (if pass.is_empty() { pass_off.is_empty() || pass_off.iter().all(|&o| o == 0) } else { pass_off.len() == routes + 1 && pass_off[0] == 0 && *pass_off.last().unwrap() as usize == pass.len() && pass_off.windows(2).all(|w| w[0] <= w[1]) })
+        && pass.iter().all(|&c| c != 0 && code_ok(c));
+    if ok { Ok(()) } else { Err("invalid fare zones".into()) }
+}
+
+/// Each ride edge's distance fare (`per_km` a fare km, perceived minutes) times its route node's
+/// multiplier in `mul` (T-1626; empty: all 1), the fare curve and fare zones (`put_fare_curve`), and
+/// the base's multiplier per route node in `base_mul` (T-3578, each line's own; empty: all 1).
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn put_fares(g: &mut Graph, knots: &[f32], zones: &FareZones, hop_km: &[f32], mul: &[f32], base_mul: &[f32], fare_min: f32, per_km: f32, fare_w: f32) {
     let km = |r: usize| hop_km.get(r).copied().unwrap_or(0.0);
     let m = |r: usize| mul.get(r).copied().unwrap_or(1.0);
     for (r, fare) in g.rn_fare.iter_mut().enumerate() {
         *fare = km(r) * per_km * m(r);
     }
-    put_fare_curve(g, knots, hop_km, fare_min, per_km, fare_w);
+    put_fare_curve(g, knots, zones, hop_km, fare_min, per_km, fare_w);
     let n = g.rn_fare.len();
     if mul.iter().any(|&v| v != 1.0) {
         g.rn_fare_mul = (0..n).map(m).collect();
@@ -316,12 +356,13 @@ pub(crate) struct Service {
     pub(crate) stops: Vec<u32>,
     /// Each stop's platform, x and y: its snapshot station's position (`Network::stop_x`).
     pub(crate) stop_xy: Vec<f32>,
-    /// Seconds, 6 per stop: per run and level, `(run * 3 + level) * n + k` from the line's
-    /// offset x 6. Run 0: stop k to k + 1 (0 at the last); run 1: stop k to k - 1 (0 at the first).
-    /// On a circle (T-798) the last of run 0 and the first of run 1 are the stand at the first stop,
-    /// riding on round.
+    /// Seconds, 10 per stop: per run and period (T-3542; per level before), `(run * 5 + period) *
+    /// n + k` from the line's offset x 10. Run 0: stop k to k + 1 (0 at the last); run 1: stop k to
+    /// k - 1 (0 at the first). On a circle (T-798) the last of run 0 and the first of run 1 are the
+    /// stand at the first stop, riding on round.
     pub(crate) times: Vec<f32>,
-    pub(crate) tph: Vec<[f32; LEVELS]>,
+    /// Trains an hour per line and period.
+    pub(crate) tph: Vec<[f32; PERIODS]>,
     pub(crate) cars: Vec<f32>,
     /// Each demand station's complex (`demand_groups`), empty if none were given.
     pub(crate) group: Vec<u32>,
@@ -371,19 +412,19 @@ impl Service {
             && self.back == o.back
     }
     /// T-124: the periods (bit q) whose inputs are the same in `o`: the same layout, and the run
-    /// times and trains an hour of the period's level. A period reads no other level's.
+    /// times and trains an hour of the period. A period reads no other period's.
     pub(crate) fn same_periods(&self, o: &Service) -> u32 {
         if !self.same_layout(o) {
             return 0;
         }
-        let level_same = |lev: usize| {
-            self.tph.iter().zip(&o.tph).all(|(a, b)| a[lev].to_bits() == b[lev].to_bits())
+        let period_same = |q: usize| {
+            self.tph.iter().zip(&o.tph).all(|(a, b)| a[q].to_bits() == b[q].to_bits())
                 && self.line_off.windows(2).all(|w| {
                     let (a, n) = (w[0] as usize, (w[1] - w[0]) as usize);
-                    [lev, 3 + lev].iter().all(|&r| same_bits(&self.times[6 * a + r * n..6 * a + (r + 1) * n], &o.times[6 * a + r * n..6 * a + (r + 1) * n]))
+                    [q, PERIODS + q].iter().all(|&r| same_bits(&self.times[TIMES_PER_STOP * a + r * n..TIMES_PER_STOP * a + (r + 1) * n], &o.times[TIMES_PER_STOP * a + r * n..TIMES_PER_STOP * a + (r + 1) * n]))
                 })
         };
-        let same: [bool; LEVELS] = std::array::from_fn(level_same);
+        let same: [bool; PERIODS] = std::array::from_fn(period_same);
         let nr = 2 * self.stops.len();
         let span_same = |q: usize| {
             fn at(s: &Service, q: usize, nr: usize) -> Option<&[f32]> {
@@ -395,8 +436,36 @@ impl Service {
                 (Some(a), None) | (None, Some(a)) => a.iter().all(|&v| v == 1.0),
             }
         };
-        (0..PERIODS).filter(|&q| same[PERIOD_LEVEL[q]] && span_same(q)).fold(0, |m, q| m | 1 << q)
+        (0..PERIODS).filter(|&q| same[q] && span_same(q)).fold(0, |m, q| m | 1 << q)
     }
+}
+
+/// T-3542: run times per stop in `Service::times`: two runs by five periods.
+pub(crate) const TIMES_PER_STOP: usize = 2 * PERIODS;
+
+/// T-3542: a snapshot's run times and trains an hour per period, from `times` and `tph` given per
+/// period (10 a stop, 5 a line) or per row as before periods (6 a stop and 3 a line: high, medium,
+/// low, spread over their periods by `PERIOD_ROW`); None for any other length. `line_off`: each
+/// line's first stop, and the stop count last.
+pub(crate) fn per_period(line_off: &[u32], times: &[f32], tph: &[f32]) -> Option<(Vec<f32>, Vec<[f32; PERIODS]>)> {
+    let (nstops, nl) = (*line_off.last()? as usize, line_off.len() - 1);
+    if times.len() == TIMES_PER_STOP * nstops && tph.len() == PERIODS * nl {
+        return Some((times.to_vec(), tph.chunks_exact(PERIODS).map(|c| std::array::from_fn(|q| c[q])).collect()));
+    }
+    if times.len() != 6 * nstops || tph.len() != 3 * nl {
+        return None;
+    }
+    let mut out = vec![0f32; TIMES_PER_STOP * nstops];
+    for w in line_off.windows(2) {
+        let (a, n) = (w[0] as usize, (w[1] - w[0]) as usize);
+        for run in 0..2 {
+            for q in 0..PERIODS {
+                let (to, from) = (TIMES_PER_STOP * a + (run * PERIODS + q) * n, 6 * a + (run * 3 + PERIOD_ROW[q]) * n);
+                out[to..to + n].copy_from_slice(&times[from..from + n]);
+            }
+        }
+    }
+    Some((out, tph.chunks_exact(3).map(|c| PERIOD_ROW.map(|r| c[r])).collect()))
 }
 
 pub(crate) struct Period {
@@ -555,6 +624,8 @@ pub struct DemandApi {
     pub(crate) fare_mul: Vec<f32>,
     /// T-3578: each route node's base multiplier (`set_base_mul`); empty: all 1.
     pub(crate) base_mul: Vec<f32>,
+    /// T-3740: the fare zones of the demand stations (`set_fare_zones`), US$; empty: none.
+    pub(crate) fare_zones: FareZones,
     /// The fare curve's knots, km and US$ in pairs (T-883, `set_fare_curve`); empty for the straight line.
     pub(crate) fare_curve: Vec<f32>,
     open_ms: f64,
@@ -652,7 +723,7 @@ pub fn demand_periods() -> Vec<f64> {
     (0..PERIODS)
         .flat_map(|q| {
             let (h0, h1) = PERIOD_HOURS[q];
-            [h0, h1, PERIOD_LEVEL[q] as f64, TO_WORK[q] as f64, TO_HOME[q] as f64, PEAK_HOUR_FACTOR[q] as f64]
+            [h0, h1, PERIOD_ROW[q] as f64, TO_WORK[q] as f64, TO_HOME[q] as f64, PEAK_HOUR_FACTOR[q] as f64]
         })
         .collect()
 }
@@ -690,7 +761,6 @@ impl DemandApi {
     /// period's headway (a line with no trains in a period has an infinite headway, so nobody
     /// boards it, and keeps its route nodes so results line up across periods).
     pub(crate) fn period_net(svc: &Service, q: usize) -> Network {
-        let lev = PERIOD_LEVEL[q];
         let nl = svc.cars.len();
         let mut net = Network {
             st_x: svc.st_x.clone(),
@@ -720,15 +790,16 @@ impl DemandApi {
         for l in 0..nl {
             let (a, b) = (svc.line_off[l] as usize, svc.line_off[l + 1] as usize);
             let n = b - a;
+            let o = TIMES_PER_STOP * a;
             for k in 0..n {
-                net.hop_min[a + k] = svc.times[6 * a + lev * n + k] / 60.0;
-                net.hop_back[a + k] = svc.times[6 * a + (3 + lev) * n + k] / 60.0;
+                net.hop_min[a + k] = svc.times[o + q * n + k] / 60.0;
+                net.hop_back[a + k] = svc.times[o + (PERIODS + q) * n + k] / 60.0;
             }
             // T-798: a circle is a line whose last stop is its first, with a time to ride on
             // round from it (`Service::times`)
-            net.line_wrap[l] = n >= 3 && svc.stops[a] == svc.stops[b - 1] && svc.times[6 * a + lev * n + n - 1] > 0.0;
+            net.line_wrap[l] = n >= 3 && svc.stops[a] == svc.stops[b - 1] && svc.times[o + q * n + n - 1] > 0.0;
             let hw: [f32; PERIODS] = std::array::from_fn(|p| {
-                let t = svc.tph[l][PERIOD_LEVEL[p]];
+                let t = svc.tph[l][p];
                 if t > 0.0 { 60.0 / t } else { f32::INFINITY }
             });
             net.line_headway_min.push(hw);
@@ -1060,6 +1131,7 @@ impl DemandApi {
             fare_km: vec![],
             fare_mul: vec![],
             base_mul: vec![],
+            fare_zones: FareZones::default(),
             fare_curve: vec![],
             open_ms: 0.0,
             complex_in: vec![],
@@ -1180,7 +1252,7 @@ impl DemandApi {
         let (home_k, work_k) = zone_trip_factors(&city, &z, &gr, gravity_from_pack);
         // read only above; z and gr hold what the solves need of it (T-1611)
         city.gravity = None;
-        Ok(DemandApi { city: Arc::new(city), z: Arc::new(z), gr: Arc::new(gr), weights: None, base, nr, walk_all, walk_home_zone: ns.walk_home, walk_work_zone: ns.walk_work, unr_all, unr_home: ns.unr_home, unr_work: ns.unr_work, home_k, work_k, svc: None, sz: None, want: vec![], od_st: vec![], od_at: vec![], per: (0..PERIODS).map(|_| None).collect(), fare_per_km: 0.0, fare_km: vec![], fare_mul: vec![], base_mul: vec![], fare_curve: vec![], open_ms: now_ms() - t0, complex_in: vec![], ups_in: vec![], passages_in: vec![], span_in: vec![], bus_in: (vec![], vec![]), tram_in: vec![], back_in: vec![], same: 0, layout_same: false, reusable: false, lod: Lod::of(lod::FINE)?, part: (0, 1), len_base: std::cell::OnceCell::new() })
+        Ok(DemandApi { city: Arc::new(city), z: Arc::new(z), gr: Arc::new(gr), weights: None, base, nr, walk_all, walk_home_zone: ns.walk_home, walk_work_zone: ns.walk_work, unr_all, unr_home: ns.unr_home, unr_work: ns.unr_work, home_k, work_k, svc: None, sz: None, want: vec![], od_st: vec![], od_at: vec![], per: (0..PERIODS).map(|_| None).collect(), fare_per_km: 0.0, fare_km: vec![], fare_mul: vec![], base_mul: vec![], fare_zones: FareZones::default(), fare_curve: vec![], open_ms: now_ms() - t0, complex_in: vec![], ups_in: vec![], passages_in: vec![], span_in: vec![], bus_in: (vec![], vec![]), tram_in: vec![], back_in: vec![], same: 0, layout_same: false, reusable: false, lod: Lod::of(lod::FINE)?, part: (0, 1), len_base: std::cell::OnceCell::new() })
     }
 
     /// `new` at a level of detail (T-1222, `lod::FINE` or `lod::COARSE`): the commute chunks
@@ -1266,8 +1338,9 @@ impl DemandApi {
     }
 
     /// The network to solve on, packed: station x, y pairs (metres in the pack's frame); stops
-    /// per line; the stops (station indices) line after line; 6 times per stop (seconds, see
-    /// `Service::times`); trains an hour, 3 per line (high, medium, low); cars per line.
+    /// per line; the stops (station indices) line after line; 10 times per stop (seconds, see
+    /// `Service::times`); trains an hour, 5 per line (a period each); cars per line. Times and
+    /// trains an hour per row (6 and 3) are taken too (`per_period`).
     /// Rebuilds station access and subzones (shared by every period) unless stations, lines,
     /// stops, cars and complexes are unchanged, and forgets the results of every period whose
     /// level's run times or trains an hour changed (T-124; all of them with a new layout).
@@ -1281,9 +1354,10 @@ impl DemandApi {
             line_off.push(line_off.last().unwrap() + n);
         }
         let nstops = *line_off.last().unwrap() as usize;
-        if stops.len() != nstops || times.len() != 6 * nstops || tph.len() != 3 * nl || cars.len() != nl {
+        let per = per_period(&line_off, times, tph);
+        let Some((times, tph)) = per.filter(|_| stops.len() == nstops && cars.len() == nl) else {
             return Err(format!("network arrays disagree: {nl} lines, {nstops} stops, {} stop entries, {} times, {} tph, {} cars", stops.len(), times.len(), tph.len(), cars.len()));
-        }
+        };
         if stops.iter().any(|&s| s as usize >= ns) {
             return Err("a stop names a station that is not in the list".into());
         }
@@ -1304,8 +1378,8 @@ impl DemandApi {
             line_off,
             stops: stops.iter().map(|&s| st_map[s as usize]).collect(),
             stop_xy: stops.iter().flat_map(|&s| [st_xy[2 * s as usize], st_xy[2 * s as usize + 1]]).collect(),
-            times: times.to_vec(),
-            tph: tph.chunks_exact(3).map(|c| [c[0], c[1], c[2]]).collect(),
+            times,
+            tph,
             cars: cars.iter().enumerate().map(|(l, &c)| if tram_line.get(l).copied().unwrap_or(false) { c * TRAM_CARS } else { c }).collect(),
             group,
             span: span_for(&self.span_in, nstops),
@@ -1326,6 +1400,7 @@ impl DemandApi {
             self.fare_km.clear();
             self.fare_mul.clear();
             self.base_mul.clear();
+            self.fare_zones = FareZones::default();
             self.sz = None;
             self.want.clear();
             self.od_st.clear();
@@ -1394,6 +1469,25 @@ impl DemandApi {
         let mul = if mul.iter().all(|&v| v == 1.0) { &[][..] } else { mul };
         if !same_bits(mul, &self.base_mul) {
             self.base_mul = mul.to_vec();
+            self.per.iter_mut().for_each(|p| *p = None);
+            self.same = 0;
+        }
+        Ok(())
+    }
+
+    /// T-3740: the player's fare zones, after `set_network`: per station it was given 0 for none,
+    /// else (area index + 1) << 8 | zone number (1-255); per area its prices for 1, 2, ... zones,
+    /// US$ as this population pays them, `usd[off[a]..off[a + 1]]`. All empty: none. T-3758: per
+    /// route node in `set_fares`' layout 1 where its line pays the distance fare (`dist`, empty for
+    /// none), and the codes of the stations its trains pass to the next stop without stopping
+    /// (`pass[pass_off[r]..pass_off[r + 1]]`, both empty for none). Zone rides in one area pay one
+    /// price, for the zones from the lowest to the highest they touch (`kernel::ZoneWork`).
+    #[allow(clippy::too_many_arguments)]
+    pub fn set_fare_zones(&mut self, st: &[u32], off: &[u32], usd: &[f32], dist: &[u8], pass_off: &[u32], pass: &[u32]) -> Result<(), String> {
+        check_fare_zones(st, off, usd, dist, pass_off, pass, self.svc.as_ref().map_or(0, |s| 2 * s.stops.len()))?;
+        let z = self.svc.as_ref().map_or_else(FareZones::default, |s| demand_fare_zones(&s.st_map, s.st_x.len(), st, off, usd, dist, pass_off, pass));
+        if z != self.fare_zones {
+            self.fare_zones = z;
             self.per.iter_mut().for_each(|p| *p = None);
             self.same = 0;
         }
@@ -1488,7 +1582,7 @@ impl DemandApi {
         let walk0 = self.walk_all * p.period_share as f64;
         let net = Self::period_net(svc, q);
         let mut g = build_graph(&net, &p);
-        put_fares(&mut g, &self.fare_curve, &self.fare_km, &self.fare_mul, &self.base_mul, self.base.fare_min, self.fare_per_km, self.base.fare_w);
+        put_fares(&mut g, &self.fare_curve, &self.fare_zones, &self.fare_km, &self.fare_mul, &self.base_mul, self.base.fare_min, self.fare_per_km, self.base.fare_w);
         let no_crowding = vec![1.0; g.rn_ride.len()];
         set_crowding(&mut g, &no_crowding);
         let xi = xfer_index(&g);
@@ -1523,7 +1617,7 @@ impl DemandApi {
         if g.rn_ride.len() != src.g.rn_ride.len() || g.n != src.g.n {
             return false;
         }
-        put_fares(&mut g, &self.fare_curve, &self.fare_km, &self.fare_mul, &self.base_mul, self.base.fare_min, self.fare_per_km, self.base.fare_w);
+        put_fares(&mut g, &self.fare_curve, &self.fare_zones, &self.fare_km, &self.fare_mul, &self.base_mul, self.base.fare_min, self.fare_per_km, self.base.fare_w);
         let no_crowding = vec![1.0; g.rn_ride.len()];
         set_crowding(&mut g, &no_crowding);
         let xi = xfer_index(&g);

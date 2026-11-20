@@ -9,7 +9,7 @@
 
 use super::capacity::ResKind;
 use super::net::Network;
-use super::params::LEVELS;
+use super::params::SLOTS;
 use super::profile;
 use super::service::Service;
 
@@ -90,9 +90,9 @@ fn crowding(meets: &[Meet], h: f64, phase: f64, shift: f64) -> f64 {
 /// as needed). The lines they meet with spare time then move only where theirs stands, against them,
 /// and `lines` are placed once more (T-2972: two branches into one terminus both stand theirs at
 /// the far ends, which neither reaches alone). Returns the lines whose phase or split moved.
-pub fn place(net: &Network, svc: &Service, lines: &[u32], phase: &mut Vec<[f32; LEVELS]>, split: &mut Vec<[f32; LEVELS]>) -> Vec<u32> {
-    phase.resize(phase.len().max(net.line_count()), [0.0; LEVELS]);
-    split.resize(split.len().max(net.line_count()), [0.5; LEVELS]);
+pub fn place(net: &Network, svc: &Service, lines: &[u32], phase: &mut Vec<[f32; SLOTS]>, split: &mut Vec<[f32; SLOTS]>) -> Vec<u32> {
+    phase.resize(phase.len().max(net.line_count()), [0.0; SLOTS]);
+    split.resize(split.len().max(net.line_count()), [0.5; SLOTS]);
     // where its spare time would stand with nothing else known: at the end it does not share
     for &l in lines {
         seed_split(net, svc, l, split);
@@ -110,7 +110,7 @@ pub fn place(net: &Network, svc: &Service, lines: &[u32], phase: &mut Vec<[f32; 
             continue;
         }
         for u in us {
-            if !mine[u.line as usize] && (0..LEVELS).any(|lev| svc.spare(net, u.line as usize, lev) >= 1.0) {
+            if !mine[u.line as usize] && net.slots().any(|lev| svc.spare(net, u.line as usize, lev) >= 1.0) {
                 others.push(u.line);
             }
         }
@@ -137,7 +137,7 @@ pub fn place(net: &Network, svc: &Service, lines: &[u32], phase: &mut Vec<[f32; 
 /// T-2972: a line with spare time whose track is shared at one end only stands it at the other (a
 /// branch into a shared terminus waits out at its own far end, so the order its trains leave the
 /// terminus in is the order they come back in). True when its split moved.
-fn seed_split(net: &Network, svc: &Service, l: u32, split: &mut [[f32; LEVELS]]) -> bool {
+fn seed_split(net: &Network, svc: &Service, l: u32, split: &mut [[f32; SLOTS]]) -> bool {
     // T-3474: the ends of the part of its plan it runs
     let path = match svc.lines.get(l as usize).filter(|x| x.part.is_some()) {
         Some(x) => &x.runs[0].segs[..],
@@ -151,7 +151,7 @@ fn seed_split(net: &Network, svc: &Service, l: u32, split: &mut [[f32; LEVELS]])
         _ => return false,
     };
     let mut moved = false;
-    for lev in 0..LEVELS {
+    for lev in net.slots() {
         if svc.spare(net, l as usize, lev) >= 1.0 && split[l as usize][lev] != want {
             split[l as usize][lev] = want;
             moved = true;
@@ -161,7 +161,7 @@ fn seed_split(net: &Network, svc: &Service, l: u32, split: &mut [[f32; LEVELS]])
 }
 
 /// One pass of `place`; `split_only`: each line keeps its phase.
-fn place_pass(net: &Network, svc: &Service, lines: &[u32], phase: &mut Vec<[f32; LEVELS]>, split: &mut Vec<[f32; LEVELS]>, split_only: bool) -> Vec<u32> {
+fn place_pass(net: &Network, svc: &Service, lines: &[u32], phase: &mut Vec<[f32; SLOTS]>, split: &mut Vec<[f32; SLOTS]>, split_only: bool) -> Vec<u32> {
     let cap = &svc.cap;
     let mut todo: Vec<u32> = lines.iter().copied().filter(|&l| svc.lines.get(l as usize).is_some_and(|x| x.running && !x.is_bus())).collect();
     todo.sort_unstable();
@@ -192,7 +192,10 @@ fn place_pass(net: &Network, svc: &Service, lines: &[u32], phase: &mut Vec<[f32;
     }
     // T-2231, T-2419: following pairs timetabled together, by level: (faster line, its run), (slower
     // line, its run), how far behind it belongs (s)
-    let paired: [Vec<((u32, u8), (u32, u8), f64)>; LEVELS] = std::array::from_fn(|lev| {
+    let paired: [Vec<((u32, u8), (u32, u8), f64)>; SLOTS] = std::array::from_fn(|lev| {
+        if !net.slot_worked(lev) {
+            return vec![];
+        }
         let mut v = cap.follow_targets(net, lev);
         v.retain(|x| want[x.0 .0 as usize] || want[x.1 .0 as usize]);
         v
@@ -221,7 +224,7 @@ fn place_pass(net: &Network, svc: &Service, lines: &[u32], phase: &mut Vec<[f32;
         let Some(Some(lat)) = lats[l as usize] else { continue };
         let mut p = phase[l as usize];
         let mut x = split[l as usize];
-        for lev in 0..LEVELS {
+        for lev in net.slots() {
             let tph = lat.tph[lev] as f64;
             if tph <= 0.0 {
                 continue;
@@ -330,8 +333,8 @@ mod tests {
         assert_eq!(da.len(), 6);
         let gap = closest(&da, &db);
         assert!(gap > 0.4 * 600.0, "the two lines leave {gap:.0} s apart: {da:?} {db:?}");
-        assert_eq!(w.net.line_phase_of(a), [0.0; 3], "the first line keeps its times");
-        assert_eq!(w.net.line_phase_of(alone), [0.0; 3], "nothing shares its track");
+        assert_eq!(w.net.line_phase_of(a), [0.0; crate::track::params::SLOTS], "the first line keeps its times");
+        assert_eq!(w.net.line_phase_of(alone), [0.0; crate::track::params::SLOTS], "nothing shares its track");
         // a third line on the same track takes the gaps that are left
         let c = line(&mut w, &n, [6.0, 4.0, 2.0]);
         let dc = deps(&w, c);
@@ -385,7 +388,7 @@ mod tests {
             for tr in w.svc.trips(&w.net, t0 - 7200.0, t0 + 3600.0).into_iter().filter(|tr| tr.run == 1) {
                 let run = &w.svc.lines[tr.line as usize].runs[1];
                 let i = run.nodes.iter().position(|&x| x == j).unwrap();
-                let s = tr.draw + profile::time_at(&run.prof[tr.level as usize].phases, run.node_s[i]);
+                let s = tr.draw + profile::time_at(&w.svc.lines[tr.line as usize].prof_of(1, tr.level as usize, tr.var).phases, run.node_s[i]);
                 if s >= t0 && s < t0 + 3600.0 { at_j.push((s, tr.line)); }
             }
             at_j.sort_by(|x, y| x.0.total_cmp(&y.0));
@@ -447,7 +450,7 @@ mod tests {
                 for tr in w.svc.trips(&w.net, t0 - 7200.0, t0 + 3600.0).into_iter().filter(|tr| tr.run == 1) {
                     let run = &w.svc.lines[tr.line as usize].runs[1];
                     let i = run.nodes.iter().position(|&x| x == j).unwrap();
-                    let s = tr.draw + profile::time_at(&run.prof[tr.level as usize].phases, run.node_s[i]);
+                    let s = tr.draw + profile::time_at(&w.svc.lines[tr.line as usize].prof_of(1, tr.level as usize, tr.var).phases, run.node_s[i]);
                     if s >= t0 && s < t0 + 3600.0 { at_j.push((s, tr.line)); }
                 }
                 at_j.sort_by(|x, y| x.0.total_cmp(&y.0));
@@ -468,16 +471,64 @@ mod tests {
             // the pacing has held through a settle, an edit that moves nothing paces nothing again
             let state = |w: &TrackWorld| ls.iter().map(|&l| (w.net.line_pace_of(l), w.net.line_tph[l as usize], w.net.line_trains[l as usize])).collect::<Vec<_>>();
             let before = state(&w);
-            let tph = w.net.line_tph[ls[0] as usize];
+            let tph = crate::track::params::slots_to_rows(w.net.line_tph[ls[0] as usize]);
             let refused = w.apply_paid(Op::TrainCounts { id: ls[0], trains: Some([5, 2, 0]), tph }, 0.0, false, &|_| 1.0);
             assert!(matches!(refused, Err(super::super::world::ChargeError::Money { .. })));
             assert_eq!(before, state(&w));
-            let same = |w: &mut TrackWorld| w.apply(Op::TrainCounts { id: ls[1], trains: w.net.line_trains[ls[1] as usize], tph: w.net.line_tph[ls[1] as usize] }).unwrap();
+            let same = |w: &mut TrackWorld| w.apply(Op::TrainCounts { id: ls[1], trains: w.net.line_trains[ls[1] as usize], tph: crate::track::params::slots_to_rows(w.net.line_tph[ls[1] as usize]) }).unwrap();
             same(&mut w);
             let held = state(&w);
             assert!(held.iter().all(|x| x.0[HIGH] > 0.0), "still in step: {held:?}");
             same(&mut w);
             assert_eq!(held, state(&w));
         }
+    }
+
+    /// T-3584: two count lines on branches 5.1 and 6.0 km, 4 trains each on weekdays, run one headway
+    /// there (T-2973); at 3 trains each on weekends they are paced again from the weekend headways
+    /// (the weekday pace 302 s would leave them 400 s apart by 1.6 s), the weekdays' left as they were.
+    #[test]
+    fn weekend_lines_at_a_merge_are_paced_from_their_weekend_headways() {
+        use super::super::net::Weekend;
+        use super::super::params::{HIGH, WEEKEND};
+        let mut w = world();
+        let t = node(&mut w, 0.0, 0.0, 0);
+        let j = node(&mut w, 3000.0, 0.0, 0);
+        let m = node(&mut w, 6000.0, 0.0, 0);
+        let br = node(&mut w, 4400.0, 1500.0, 0);
+        edge(&mut w, t, j, &[], 0).unwrap();
+        edge(&mut w, j, m, &[], 0).unwrap();
+        edge(&mut w, j, br, &[(3400.0, 0.0)], 0).unwrap();
+        for x in [t, m, br] { station(&mut w, x, 200); }
+        crate::track::tests::terminals_at_dead_ends(&mut w);
+        let mut ls = vec![];
+        for end in [br, m] {
+            let l = line(&mut w, &[t, end], [0.0; 3]);
+            w.apply(Op::TrainCounts { id: l, trains: Some([4, 2, 0]), tph: [6.0, 3.0, 0.0] }).unwrap();
+            ls.push(l);
+        }
+        let week = |w: &TrackWorld| ls.iter().map(|&l| (w.net.line_pace_of(l), w.net.line_tph[l as usize], w.net.line_trains[l as usize])).collect::<Vec<_>>();
+        let before = week(&w);
+        assert!(before.iter().all(|x| x.0[HIGH] > 0.0), "weekdays in step");
+        // the weekend headways: the long branch with 5 trains runs as often as the short with 3
+        let trip: Vec<f64> = ls.iter().map(|&l| w.svc.lines[l as usize].round_trip[HIGH]).collect();
+        let counts = [3u32, 3];
+        let own: Vec<f64> = (0..2).map(|i| trip[i] / counts[i] as f64).collect();
+        let (lo, hi) = (own[0].min(own[1]), own[0].max(own[1]));
+        // (the two headways are what the branches' lengths make them: skip the premise if not close)
+        for (i, &l) in ls.iter().enumerate() {
+            w.apply(Op::Weekend { id: l, weekend: Weekend { share: 100, counts: Some([counts[i], 2, 0]), headways: [0; 3] } }).unwrap();
+        }
+        assert_eq!(before, week(&w), "the weekdays are left as they were");
+        assert!(hi / lo - 1.0 < 0.03, "weekend headways {own:?} within the pacing share");
+        let rest: Vec<f64> = ls.iter().map(|&l| 3600.0 / w.net.line_tph_on(l as usize, WEEKEND, HIGH) as f64).collect();
+        assert!((rest[0] - rest[1]).abs() < 0.01, "one weekend headway: {rest:?} (own {own:?})");
+        assert!(w.pace_rest.iter().any(|p| p[HIGH] > 0.0), "weekend pacing kept");
+        // the same through an edit elsewhere on the weekends' kept service
+        let kept = rest.clone();
+        w.apply(Op::Weekend { id: ls[0], weekend: Weekend { share: 100, counts: Some([counts[0], 2, 0]), headways: [0; 3] } }).unwrap();
+        let again: Vec<f64> = ls.iter().map(|&l| 3600.0 / w.net.line_tph_on(l as usize, WEEKEND, HIGH) as f64).collect();
+        assert!(again.iter().zip(&kept).all(|(a, b)| (a - b).abs() < 1.0), "{again:?} against {kept:?}");
+        assert_eq!(before, week(&w));
     }
 }

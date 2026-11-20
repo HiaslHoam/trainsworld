@@ -111,6 +111,7 @@ PRODUCTS = {
 }
 MOLL_X0, MOLL_Y0, TILE_M, PIX_M = -18041000.0, 9000000.0, 1_000_000.0, 100.0
 WORLDBANK = "https://api.worldbank.org/v2/country/{iso2}/indicator/SL.EMP.TOTL.SP.ZS;SP.POP.0014.TO.ZS?source=2&format=json&date=2015:2025&per_page=100"
+WB_COUNTRIES = "https://api.worldbank.org/v2/country?format=json&per_page=400"
 WORLDBANK_NE = "https://api.worldbank.org/v2/country/{iso2}/indicator/SL.EMP.TOTL.SP.NE.ZS?format=json&date=2015:2025&per_page=100"
 WIKIDATA = "https://query.wikidata.org/sparql"
 
@@ -462,6 +463,16 @@ def worldbank(iso2):
             for x in json.load(f)[1] or []:
                 if x["value"] is not None and x["date"] in by:
                     by[x["date"]]["SL.EMP.TOTL.SP.ZS"] = x["value"] / 100.0
+    if not any(len(v) == 2 for v in by.values()):
+        # no ratio of its own either (Aruba, Dominica, Saint Kitts and Nevis, T-3620): its World Bank region's
+        path = netget.cached_json(WB_COUNTRIES, raw("worldbank_countries.json"), timeout=60)
+        with open(path) as f:
+            region = next(c["region"]["iso2code"] for c in json.load(f)[1] if c["iso2Code"] == iso2)
+        path = netget.cached_json(WORLDBANK.format(iso2=region), raw(f"worldbank_{region}.json"), timeout=60)
+        with open(path) as f:
+            for x in json.load(f)[1] or []:
+                if x["value"] is not None and x["indicator"]["id"] == "SL.EMP.TOTL.SP.ZS" and x["date"] in by:
+                    by[x["date"]]["SL.EMP.TOTL.SP.ZS"] = x["value"] / 100.0
     year = max(y for y, v in by.items() if len(v) == 2)
     emp, kids = by[year]["SL.EMP.TOTL.SP.ZS"], by[year]["SP.POP.0014.TO.ZS"]
     return emp * (1 - kids), kids, int(year)
@@ -473,6 +484,37 @@ NATIONAL_TERTIARY = {
     "TW": (1_094_829 / 23_400_220, 2023, "Ministry of Education, students in universities and colleges in school year 112 "
            "(2023-24), 1,094,829 (doctoral, master's, bachelor's and junior college), over the registered population "
            "at end 2024, 23,400,220 (T-3274)", "https://stats.moe.gov.tw/files/analysis/113_st_report.pdf"),
+    # the World Bank has no tertiary enrolment for either since 2010 (T-3518)
+    "NI": (193_116 / 6_823_613, 2023, "CNU (Consejo Nacional de Universidades) statistical yearbook, 2023 enrolment "
+           "193,116 as reported by Confidencial and La Prensa, over the World Bank's 2023 population, 6,823,613 "
+           "(the regime's 2024 claim is 180,220, 2026 claim over 200,000; T-3518)",
+           "https://www.laprensani.com/2024/11/18/nacionales/3401896-eduacion-universitaria-crisis-nicaragua"),
+    # no published count since 2018 (government 1,666,157): an independent estimate instead, 17% of ages 18-24
+    "VE": (0.17 * (0.6 * 2_706_262 + 2_220_181) / 28_300_854, 2023, "Observatorio de Universidades: about 17% of "
+           "ages 18-24 in university; 18-24 is 3.84M in 2023 (UN WPP via World Bank, 3/5 of ages 15-19 plus 20-24), "
+           "so about 653,000 students, over the 2023 population 28,300,854. Government's last count, 2018, is "
+           "1,666,157, not used (T-3518)",
+           "https://cotejo.info/2024/10/ct-nicolas-maduro-el-alcance-de-la-educacion-universitaria-en-venezuela-supera-a-cualquier-pais-en-la-region-mentira/"),
+    # the World Bank has no tertiary enrolment for Bolivia since 2010 (T-3620)
+    "BO": (476_270 / 0.784 / 11_816_299, 2020, "INE: 476,270 students in public universities in 2020 (as cited by Los "
+           "Tiempos, 2022-06-10), over the public share of tertiary enrolment, 78.4% in 2021 (Red IndicES as cited by "
+           "Chequeado): about 607,000 students, over the World Bank's 2020 population, 11,816,299 (T-3620)",
+           "https://www.lostiempos.com/node/570312"),
+    # the World Bank has no tertiary enrolment for these since 2010; Haiti has no usable count at all (T-3755)
+    "TT": (20_889 / 1_367_764, 2025, "UNESCO UIS enrolment in tertiary education, all programmes, 2025, 20,889, over the "
+           "World Bank's 2025 population, 1,367,764 (the Ministry of Education's 2019/20 digest counts 28,280 in public "
+           "institutions plus an estimated 16,193 in private ones, not used; T-3755)",
+           "https://api.uis.unesco.org/api/public/data/indicators?indicator=25053&geoUnit=TTO"),
+    "KY": (1_423 / 73_038, 2023, "UNESCO UIS enrolment in tertiary education, all programmes, 2023, 1,423, over the "
+           "World Bank's 2023 population, 73,038 (T-3755)",
+           "https://api.uis.unesco.org/api/public/data/indicators?indicator=25053&geoUnit=CYM"),
+    "BS": ((5_000 + 2_666) / 397_538, 2022, "University of The Bahamas, about 5,000 students across its campuses and "
+           "online (Board of Trustees statement, 2022-02), plus BTVI fall 2022 enrolment, 2,666 (Tribune, 2023-10-19), "
+           "over the World Bank's 2022 population, 397,538 (T-3755)",
+           "https://tribune242.com/news/2023/oct/19/btvi-saw-small-rise-enrolment-spring-2023-over-pre"),
+    "DM": (1_500 / 66_510, 2023, "Dominica State College, about 1,500 students (the college's own page, 2023), over the "
+           "World Bank's 2023 population, 66,510; excludes the UWI Open Campus and offshore medical schools (T-3755)",
+           "https://dsc.edu.dm/about/"),
 }
 
 

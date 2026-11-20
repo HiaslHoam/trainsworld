@@ -32,7 +32,7 @@ import { stopsById, world } from "./game/world";
 import { hiddenLevels, hiddenLines, hideBuses, levelBits } from "./game/lineVisibility";
 import { setHidden } from "./map/visibility";
 import "./game/capLoad";
-import { removeThing, removeTracks, setTrackHider } from "./game/remove";
+import { removeThing, setTrackHider } from "./game/remove";
 import { redo, undo } from "./game/fareUndo";
 import { followTrack } from "./game/trackZones";
 import { baseTrips, incomeByDay, lastSaved, moneyState } from "./game/money";
@@ -53,8 +53,7 @@ import { StationLabels } from "./map/stationLabels";
 import { stationIndexOf, tripAt } from "./map/network";
 import { cityOverview } from "./map/intercityView";
 import { Overlay } from "./map/overlay";
-import { carryGrids, pick, SLOP_PX, topSeg } from "./map/pick";
-import { selectedPieces, shiftTrack } from "./game/trackSet";
+import { carryGrids, pick } from "./map/pick";
 import { carryEdgeGrid } from "./map/snapIndex";
 import { NetworkRenderer } from "./map/renderer";
 import { followTrain } from "./map/trainFollow";
@@ -69,7 +68,8 @@ import { StopMarkers } from "./map/stopMarkers";
 import { BusStopMarkers } from "./map/busStops";
 import { EdgeEditor } from "./map/edgeEdit";
 import { BlueprintBox } from "./map/blueprintBox";
-import { bpPicked, clearBpPicked, levelPicked, pickedState } from "./game/blueprintPick";
+import { FareZoneTool } from "./map/fareZoneTool";
+import { bpPicked, clearBpPicked, dropPicked, levelPicked, pickedState, removePicked, selectPicked } from "./game/blueprintPick";
 import { NodeDrag } from "./map/nodeDrag";
 import { EndMarkers } from "./map/endMarkers";
 import { hoverAbove } from "./map/demandHover";
@@ -84,7 +84,7 @@ import { openings, startOpeningDay } from "./game/openingDay";
 import { startLineFigures } from "./game/lineFigures";
 import { startEditNote } from "./game/editNote";
 import { perfOff } from "./perfFlags";
-import { DEMAND_INDEX, type Selection } from "./game/types";
+import type { Selection } from "./game/types";
 import { anchor, kAtY, toLngLat, toLocal } from "./map/geo";
 import { Debug, perfText } from "./ui/Debug";
 import { Dock } from "./ui/Dock";
@@ -124,6 +124,7 @@ import { startDemandViews, viewStats } from "./map/demandViews";
 import { startTripView } from "./map/tripView";
 import { modeColours } from "./game/palette";
 import { setClockDiagnosis } from "./game/diagnostics";
+import { PROFILES } from "./map/profiles";
 
 // The mode colours are the network's, not the theme's (T-084): the top bar's split uses them. They
 // follow the bubble scheme (T-833).
@@ -206,13 +207,16 @@ render(h(MapTopLeft, null), demandSelectorRoot); // the demand buttons and the s
 // T-2657: demand stopped for good: the notice at the top centre; Reload writes the autosave first
 const demandStoppedRoot = document.createElement("div");
 map.getContainer().appendChild(demandStoppedRoot);
-render(h(DemandStopped, { save: () => client.saveBeforeReload() }), demandStoppedRoot);
+// the notices below can fire before the clock client exists (the graphics lost while the game loads): nothing to save then
+let earlyClient: ClockClient | null = null;
+const saveGame = () => earlyClient ? earlyClient.saveBeforeReload() : Promise.resolve();
+render(h(DemandStopped, { save: saveGame }), demandStoppedRoot);
 // T-3582: the browser refused the page graphics mid-game: the game is saved before the player restarts the browser
-onGraphicsGone(() => { void client.saveBeforeReload(); });
+onGraphicsGone(() => { void saveGame(); });
 // T-2962: a file of this tab gone from the server after a publish: a notice with Reload, which saves first
 const newVersionRoot = document.createElement("div");
 map.getContainer().appendChild(newVersionRoot);
-render(h(NewVersion, { save: () => client.saveBeforeReload() }), newVersionRoot);
+render(h(NewVersion, { save: saveGame }), newVersionRoot);
 // co-op between two tabs (game/coop.ts): its panel at the bottom, and the role kept over the page's reloads
 const coopRoot = document.createElement("div");
 document.body.appendChild(coopRoot);
@@ -222,7 +226,7 @@ watchCoopClock();
 // T-3314: the clock worker or the demand pool has gone quiet for minutes: a notice with Reload
 const figuresStoppedRoot = document.createElement("div");
 map.getContainer().appendChild(figuresStoppedRoot);
-render(h(FiguresStopped, { save: () => client.saveBeforeReload() }), figuresStoppedRoot);
+render(h(FiguresStopped, { save: saveGame }), figuresStoppedRoot);
 // T-2802, T-2839: a phone has no trips between cities, and a device reporting 4 GB or less may not run well; said once per game load
 if (deviceNoteApplies()) {
   const noMarketRoot = document.createElement("div");
@@ -321,6 +325,7 @@ startOpenFit(); // T-895
 
 // ---- the clock worker: owns the network; its states and trips go to the renderer ----
 const client = new ClockClient();
+earlyClient = client;
 setClockDiagnosis(() => client.diagnosis()); // T-3313: for feedback reports
 // T-3628: a download that failed while the tab was in the background or offline (iOS suspends fetches) is tried again once on return
 const retryDownloads = () => { retryPackDownloads(); retryGround(); };
@@ -404,9 +409,11 @@ watchInput();
 render(h(TouchBar, null), tools.touchHost);
 // The blueprint tool: a drag box picks blueprint track and stations to switch off or on (T-333).
 const blueprintBox = new BlueprintBox(map, overlay, client);
+// T-3740: the Fare zones tool: a click or a loop gives stations a fare zone; the tint while it is on
+const fareZoneTool = new FareZoneTool(map, overlay);
 live.tools = tools;
 // Stop editing (T-233): a toggle marker on every station; the page class hides the demand views
-tools.stops = new StopMarkers(map, overlay, (station) => tools.toggleStop(station), (station, tier) => tools.loopStop(station, tier));
+tools.stops = new StopMarkers(map, overlay, (station, oneWay) => tools.toggleStop(station, oneWay), (station, tier) => tools.loopStop(station, tier));
 tools.busStops = new BusStopMarkers(map, overlay);
 // T-797: a large icon over every station where a line reverses partway
 if (!SYNTH) new ReversalMarks(map, overlay);
@@ -488,6 +495,7 @@ effect(() => {
 });
 
 const labels = new StationLabels(map.getContainer(), overlay, map);
+fareZoneTool.nameBoxes = () => labels.shownBoxes();
 effect(() => {
   const w = world.value;
   if (w && !SYNTH) labels.set(w);
@@ -505,14 +513,14 @@ const capacity = new CapacityMarkers(map.getContainer(), overlay, map);
 capacity.demandClick = demandOnTop;
 effect(() => {
   const w = world.value;
-  const level = DEMAND_INDEX[clock.demand.value];
-  if (w && !SYNTH) capacity.set(w, level);
+  // T-3542: the period's markers
+  if (w && !SYNTH) capacity.set(w, clock.period.value);
 });
 effect(() => capacity.setVisible(display.value.capacity && !SYNTH));
 // T-819, T-1125: in the traffic view, lines on track at capacity at the level in force, and those whose trains usually run full, get a red outline
 effect(() => {
   const w = world.value, traffic = display.value.trackColour === "traffic" && display.value.fullMarks; // T-1152's switch
-  const full = w?.fullTrack[DEMAND_INDEX[clock.demand.value]];
+  const full = w?.fullTrack[clock.period.value];
   renderer.setFull(traffic && full ? new Set(full.keys()) : null, traffic);
   overlay.invalidate();
 });
@@ -536,7 +544,7 @@ map.on("load", () => {
   effect(() => setRailRoadHint(map, tool.value === "track" && !tramTrack.value && snapRoads.value)); // T-3129
   startTerrainTint(map); // T-1270 stage 3
   startRealNetwork(map); // T-682
-  startRealStations(map); // T-3570
+  startRealStations(map, overlay); // T-3570
 });
 effect(() => client.setShade(shade.value)); // save thumbnails are drawn in it (T-543)
 // T-039: the network's casing and inks come from game/shades.ts at each draw
@@ -561,7 +569,7 @@ effect(() => {
 // ---- picking and tools ----
 map.on("click", (e) => {
   if (tool.peek() === "trip") tripTool.click(e); // T-195
-  else if (tool.peek() === "blueprint") return; // its pointer handlers pick (map/blueprintBox.ts)
+  else if (tool.peek() === "blueprint" || tool.peek() === "fares") return; // their pointer handlers pick (map/blueprintBox.ts, map/fareZoneTool.ts)
   else if (tool.peek() !== "select") touchInput.peek() ? tools.tap(e) : tools.click(e);
   else selectAt(e.point.x, e.point.y, e.originalEvent.shiftKey);
 });
@@ -579,10 +587,15 @@ map.on("dblclick", (e) => {
 function selectAt(x: number, y: number, add: boolean) {
   // linking a station into a complex (T-197): the station clicked is the other end
   if (linking.peek() !== null) void linkPicked(pick(overlay, x, y, false, selection.peek()));
-  // T-3634: Shift with built track selected adds or takes out the track under the pointer, a line on it or not
-  else if (add && shiftTrackAt(x, y)) return;
+  // T-3746: Shift with track picked adds to the pick by the Select tool's rule (the track between, a line on it
+  // or not); one piece left opens its panel, more none. A Shift+click that misses keeps the pick, as in the tool.
+  else if (add && hasPick()) {
+    if (blueprintBox.shiftClick(x, y)) selectPicked();
+  }
   // lines, stations and trains, then commuter bubbles while they are shown, then the rest (T-1515)
   else {
+    // a plain click drops the pick; track clicked becomes the pick again (game/blueprintPick.ts)
+    clearBpPicked();
     const cur = selection.peek();
     const hit = demandOnTop(x, y, add) ?? pick(overlay, x, y, display.peek().trains && !onMark(x, y), cur, true, (num, seg) => lineSizeAt(overlay, num, seg));
     // a station of the selected complex, or another of a station opened alone from it: that station alone (T-3539);
@@ -596,22 +609,12 @@ function selectAt(x: number, y: number, add: boolean) {
   }
 }
 capacity.selectClick = selectAt;
-/** The piece of track drawn at (x, y) px, or -1. */
-function trackAt(x: number, y: number): number {
-  const n = renderer.net;
-  if (!n) return -1;
-  const [ti] = topSeg(overlay, n.track.seg, n.track.count, x, y, SLOP_PX * SLOP_PX + 1);
-  return ti >= 0 ? n.track.edge[ti] : -1;
-}
-function shiftTrackAt(x: number, y: number): boolean {
-  const edge = trackAt(x, y);
-  return edge >= 0 && shiftTrack(edge);
-}
-// T-3634: a Shift press on track with built track selected is a click, not the start of MapLibre's zoom box
-// (which would swallow the click); elsewhere Shift+drag zooms as before
+const hasPick = () => bpPicked.peek().edges.length + bpPicked.peek().stations.length > 0;
+// T-3634, T-3746: a Shift press on track or a station with something picked is a click, not the start of
+// MapLibre's zoom box (which would swallow the click); elsewhere Shift+drag zooms as before
 map.on("mousedown", (e) => {
   const o = e.originalEvent;
-  if (o.shiftKey && o.button === 0 && tool.peek() === "select" && linking.peek() === null && selectedPieces() && trackAt(e.point.x, e.point.y) >= 0) e.preventDefault();
+  if (o.shiftKey && o.button === 0 && tool.peek() === "select" && linking.peek() === null && hasPick() && blueprintBox.hitAt(e.point.x, e.point.y)) e.preventDefault();
 });
 // Linking stops when its station is no longer the selection or a tool is picked.
 effect(() => {
@@ -628,7 +631,7 @@ if (!SYNTH && !perfOff("hover")) // ?perfOff=hover: T-045 measurement only
       if (map.getCanvas().style.cursor !== c) map.getCanvas().style.cursor = c;
       return;
     }
-    if (tool.peek() === "blueprint") return;
+    if (tool.peek() === "blueprint" || tool.peek() === "fares") return;
     if (tool.peek() !== "select") return tools.move(e);
     // a blueprint point drags even over a demand bubble (T-474), so its grab cursor comes first
     const cur = linking.peek() !== null ? (pick(overlay, e.point.x, e.point.y, false)?.kind === "station" ? "pointer" : "crosshair") : nodeDrag.hit(e.point.x, e.point.y)?.movable ? "grab" : demandHover?.(e.point.x, e.point.y) ? "pointer" : pick(overlay, e.point.x, e.point.y, display.peek().trains) ? "pointer" : "";
@@ -659,7 +662,7 @@ window.addEventListener("keydown", (e) => {
     e.preventDefault();
     return;
   }
-  if (e.key === "Escape" && (nodeDrag.cancel() || edgeEditor.cancel() || cancelLink() || blueprintBox.cancel())) {
+  if (e.key === "Escape" && (nodeDrag.cancel() || edgeEditor.cancel() || cancelLink() || blueprintBox.cancel() || fareZoneTool.cancel())) {
     e.preventDefault();
     return;
   }
@@ -719,9 +722,11 @@ window.addEventListener("keydown", (e) => {
     return;
   }
   // the blueprint tool: Esc clears the pick, then leaves the tool; E switches the pick on or off
-  if (tool.peek() === "blueprint" && e.key === "Escape" && (bpPicked.peek().edges.length || bpPicked.peek().stations.length)) {
+  // T-3746: while plain selecting, Esc drops the pick and the panel of its one piece together
+  if ((tool.peek() === "blueprint" || tool.peek() === "select") && e.key === "Escape" && hasPick()) {
     e.preventDefault();
-    clearBpPicked();
+    if (tool.peek() === "blueprint") clearBpPicked();
+    else dropPicked();
     return;
   }
   if (blueprintBox.key(e)) {
@@ -741,9 +746,10 @@ window.addEventListener("keydown", (e) => {
       void removeThing(s.kind === "track" ? { kind: "track", edge: s.edge } : { kind: "station", node: Number(s.station) });
       return;
     }
-    if (s?.kind === "tracks") {
+    // T-3746: a pick of more than one piece (no panel) goes as by the selection bar's Remove
+    if (!s && hasPick()) {
       e.preventDefault();
-      void removeTracks(s.edges);
+      void removePicked();
       return;
     }
     if (!s && e.key === "Delete") {
@@ -911,6 +917,8 @@ if (DEBUG) {
     failDemand: (why = "forced by ?debug=1") => loadCannotFinish(why), // T-2657: stop demand as if a worker died
     figures: { peaks: figuresPeaks, stopped: figuresStopped }, // T-3314: the longest quiet seen, and the notice's signal
     soundLog, map, overlay, renderer, labels, capacity, clock, world, selection, singleStation, complexOf, display, shade, tools, client, checkPrecision, moneyState, incomeByDay, lastSaved, pick, tripAt, lineRunFactor,
+    profiles: PROFILES, // T-3542: a trip's profile index, for checks (map/profiles.ts)
+    fareZoneTool, // T-3740: its draw and last numbers, for checks
     // the current draw anchor (T-307), mercator 0..1, and conversions with it
     get originMerc() { return anchor().merc; },
     anchor, toLocal, toLngLat,

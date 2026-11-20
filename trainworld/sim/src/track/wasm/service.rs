@@ -1,17 +1,31 @@
 //! Service: stop times, profiles, trips, junctions, delays and markers.
 
 use super::*;
+use crate::track::timing::PROFILE_VARS;
 
 #[wasm_bindgen]
 impl TrackApi {
     // ---- service
-    /// Time of each stop from the start of the line (SPEC 6.3), seconds: arrival times.
+    /// Time of each stop from the start of the line (SPEC 6.3), seconds: arrival times, at row
+    /// `level` (high, medium, low).
     pub fn stop_times(&self, line: u32, run: usize, level: usize) -> Vec<f64> {
-        self.w.svc.lines.get(line as usize).filter(|l| l.ok).map_or(vec![], |l| l.cumulative(run, level).to_vec())
+        let lev = self.w.net.row_slot(line as usize, level.min(ROWS - 1));
+        self.w.svc.lines.get(line as usize).filter(|l| l.ok).map_or(vec![], |l| l.cumulative(run, lev).to_vec())
     }
-    /// Departure time from each stop, seconds from the start of the trip.
+    /// Departure time from each stop, seconds from the start of the trip, at row `level`.
     pub fn stop_departures(&self, line: u32, run: usize, level: usize) -> Vec<f64> {
-        self.w.svc.lines.get(line as usize).filter(|l| l.ok).map_or(vec![], |l| l.runs[run].prof[level].dep.clone())
+        let lev = self.w.net.row_slot(line as usize, level.min(ROWS - 1));
+        self.w.svc.lines.get(line as usize).filter(|l| l.ok).map_or(vec![], |l| l.runs[run].prof[lev].dep.clone())
+    }
+    /// T-3542: `stop_times` in demand period `period` (0-4, `PERIOD_HOURS`): its slot's.
+    pub fn stop_times_in(&self, line: u32, run: usize, period: usize) -> Vec<f64> {
+        let lev = self.w.net.period_slot()[period.min(4)];
+        self.w.svc.lines.get(line as usize).filter(|l| l.ok).map_or(vec![], |l| l.cumulative(run, lev).to_vec())
+    }
+    /// T-3542: `stop_departures` in demand period `period`.
+    pub fn stop_departures_in(&self, line: u32, run: usize, period: usize) -> Vec<f64> {
+        let lev = self.w.net.period_slot()[period.min(4)];
+        self.w.svc.lines.get(line as usize).filter(|l| l.ok).map_or(vec![], |l| l.runs[run].prof[lev].dep.clone())
     }
     /// T-842: the share of each period's riders at each stop with a train due within their
     /// tolerance (`span::line_span`), `[(period * 2 + run) * n + stop]`, each run's stops in its
@@ -50,20 +64,33 @@ impl TrackApi {
         self.push_phases(line as usize, &mut out);
         out
     }
-    /// Per profile `(line * 2 + run) * 3 + level`: first phase, phase count, trip seconds
-    /// (run plus turnaround), path length m. Absent lines have count 0.
+    /// T-3542: profiles a run has (`params::SLOTS`), the stride of a trip's profile index; the app's
+    /// copy is map/profiles.ts `SLOTS`.
+    pub fn profile_slots(&self) -> u32 {
+        SLOTS as u32
+    }
+    /// T-3346 stage 2: profiles per (line, run, slot), the slot's and its train-by-train variants:
+    /// the innermost stride of a trip's profile index; the app's copy is map/profiles.ts `PROFILE_VARS`.
+    pub fn profile_vars(&self) -> u32 {
+        PROFILE_VARS as u32
+    }
+    /// Per profile `((line * 2 + run) * SLOTS + slot) * PROFILE_VARS + var`: first phase, phase
+    /// count, trip seconds (run plus turnaround), path length m. Absent lines, slots not worked out
+    /// and variants a run has not have count 0.
     pub fn profile_meta(&self) -> Vec<f32> {
         let mut out = vec![];
         let mut first = 0usize;
         for (li, l) in self.w.svc.lines.iter().enumerate() {
             for r in 0..2 {
-                for k in 0..LEVELS {
-                    if l.ok {
-                        let n = l.runs[r].prof[k].phases.len();
-                        out.extend([first as f32, n as f32, l.trip_len(&self.w.net, li as u32, r, k) as f32, l.runs[r].len as f32]);
-                        first += n;
-                    } else {
-                        out.extend([first as f32, 0.0, 0.0, 0.0]);
+                for k in 0..SLOTS {
+                    for v in 0..PROFILE_VARS {
+                        if l.ok && self.w.net.slot_worked(k) && (v == 0 || v <= l.runs[r].vars[k].len()) {
+                            let n = l.prof_of(r, k, v as u8).phases.len();
+                            out.extend([first as f32, n as f32, l.trip_len_var(&self.w.net, li as u32, r, k, v as u8) as f32, l.runs[r].len as f32]);
+                            first += n;
+                        } else {
+                            out.extend([first as f32, 0.0, 0.0, 0.0]);
+                        }
                     }
                 }
             }
@@ -82,7 +109,7 @@ impl TrackApi {
             .iter()
             .flat_map(|t| {
                 let next = t.next.map_or(f32::NAN, |n| (n - epoch) as f32);
-                [((t.line * 2 + t.run as u32) * 3 + t.level as u32) as f32, (t.draw - epoch) as f32, (t.end - epoch) as f32, next]
+                [profile_index(t) as f32, (t.draw - epoch) as f32, (t.end - epoch) as f32, next]
             })
             .collect()
     }
@@ -93,7 +120,7 @@ impl TrackApi {
             .svc
             .line_trips(&self.w.net, line as usize, t0, t1)
             .iter()
-            .flat_map(|t| [((t.line * 2 + t.run as u32) * 3 + t.level as u32) as f64, t.draw, t.end, t.next.unwrap_or(f64::NAN)])
+            .flat_map(|t| [profile_index(t) as f64, t.draw, t.end, t.next.unwrap_or(f64::NAN)])
             .collect()
     }
     /// A run's path resampled every `step` m (x, y pairs), for the renderer's line texture.
@@ -115,8 +142,8 @@ impl TrackApi {
     pub fn station_departures(&self, line: u32, node: u32, t0: f64, t1: f64) -> Vec<f64> {
         let svc = &self.w.svc;
         let Some(ls) = svc.lines.get(line as usize).filter(|l| l.ok && !l.is_bus()) else { return vec![] };
-        // The one place this reads a trip's timetable: stage 2 makes it `ls.prof_of(run, level, t.var)`.
-        let prof = |t: &crate::track::service::Trip| &ls.runs[t.run as usize].prof[t.level as usize];
+        // the one place this reads a trip's timetable: its own (T-3346 stage 2)
+        let prof = |t: &crate::track::service::Trip| ls.prof_of(t.run as usize, t.level as usize, t.var);
         let mut out: Vec<(f64, u8, usize)> = vec![];
         for t in svc.line_trips(&self.w.net, line as usize, t0, t1) {
             let p = prof(&t);
@@ -198,11 +225,11 @@ impl TrackApi {
         };
         out.push(moves.len() as f64);
         for (k, ((i, o), users)) in moves.iter().enumerate() {
-            let mut tph = [0.0f64; 3];
+            let mut tph = [0.0f64; ROWS];
             let mut lines: Vec<u32> = vec![];
             for &(l, _) in users {
-                for (lev, t) in tph.iter_mut().enumerate() {
-                    *t += n.line_tph[l as usize][lev] as f64;
+                for (row, t) in tph.iter_mut().enumerate() {
+                    *t += n.line_tph[l as usize][n.row_slot(l as usize, row)] as f64;
                 }
                 if !lines.contains(&l) {
                     lines.push(l);
@@ -211,8 +238,8 @@ impl TrackApi {
             let r = res_of(users);
             out.extend([*i as f64, *o as f64]);
             out.extend(tph);
-            out.extend(r.map_or([0.0; 3], |r| cap.delay[r]));
-            out.extend(r.map_or([0.0; 3], |r| cap.rho[r]));
+            out.extend(r.map_or([0.0; ROWS], |r| slots_to_rows(cap.delay[r])));
+            out.extend(r.map_or([0.0; ROWS], |r| slots_to_rows(cap.rho[r])));
             out.push(lines.len() as f64);
             out.extend(lines.iter().map(|&l| l as f64));
             let crossing: Vec<usize> = match r {
@@ -233,8 +260,14 @@ impl TrackApi {
     /// second number is the slower line it follows (or -1), and the delay its one direction's loss
     /// on that stretch.
     pub fn line_delays(&self, line: u32, level: usize) -> Vec<f64> {
+        self.line_delays_at(line, self.w.net.row_slot(line as usize, level.min(ROWS - 1)))
+    }
+    /// T-3542: `line_delays` in demand period `period` (0-4), at the slot serving it.
+    pub fn line_delays_in(&self, line: u32, period: usize) -> Vec<f64> {
+        self.line_delays_at(line, self.w.net.period_slot()[period.min(4)])
+    }
+    fn line_delays_at(&self, line: u32, lev: usize) -> Vec<f64> {
         let cap = &self.w.svc.cap;
-        let lev = level.min(LEVELS - 1);
         let mut v: Vec<(usize, f64)> = vec![];
         for r in 0..cap.res.len() {
             let d = cap.delay[r][lev];
@@ -265,6 +298,10 @@ impl TrackApi {
     /// Capacity markers for a level (SPEC 6.2 shows 75% and up): x, y, utilisation, delay s, kind,
     /// trains an hour through it, and 1 when it is full and holds back some line's trains (T-517).
     pub fn markers(&self, level: usize) -> Vec<f32> {
+        // `level` is a row (high, medium, low); every line of three rows keeps it in one slot
+        self.markers_at(ROW_SLOT[level.min(ROWS - 1)])
+    }
+    fn markers_at(&self, level: usize) -> Vec<f32> {
         let (cap, net) = (&self.w.svc.cap, &self.w.net);
         self.w
             .busy(level)
@@ -282,6 +319,9 @@ impl TrackApi {
     /// crossing (`Capacity::track_edges`), `[edge, utilisation, trains an hour through it]`, the
     /// fullest resource where several are.
     pub fn full_track(&self, level: usize) -> Vec<f64> {
+        self.full_track_at(ROW_SLOT[level.min(ROWS - 1)])
+    }
+    fn full_track_at(&self, level: usize) -> Vec<f64> {
         let (cap, net) = (&self.w.svc.cap, &self.w.net);
         let mut by: std::collections::HashMap<u32, (f64, f64)> = std::collections::HashMap::new();
         for r in 0..cap.res.len() {
@@ -322,7 +362,7 @@ impl TrackApi {
     /// (T-3526): the same, but with single track's margin counted for a lone train too; 0 where
     /// nothing limits.
     pub fn line_held(&self, line: u32) -> Vec<f64> {
-        let mut out = vec![0.0; 13 * LEVELS];
+        let mut out = vec![0.0; 13 * ROWS];
         let cap = &self.w.svc.cap;
         if line as usize >= self.w.net.line_count() {
             return out;
@@ -331,22 +371,25 @@ impl TrackApi {
         // the lone case only differs for a line with one train or none
         let lone = self.w.net.line_trains[line as usize].map_or(true, |t| t.iter().any(|&n| n <= 1));
         let paired = if lone { cap.line_limits_lone(&self.w.net, false)[line as usize] } else { most };
-        for lev in 0..LEVELS {
-            let tph = paired[lev].0;
-            if paired[lev].1 != u32::MAX {
-                out[12 * LEVELS + lev] = if tph > 0.0 { 3600.0 / tph } else { f64::INFINITY };
+        // per row (high, medium, low), each from its slot
+        let slot = |row: usize| self.w.net.row_slot(line as usize, row);
+        for row in 0..ROWS {
+            let tph = paired[slot(row)].0;
+            if paired[slot(row)].1 != u32::MAX {
+                out[12 * ROWS + row] = if tph > 0.0 { 3600.0 / tph } else { f64::INFINITY };
             }
         }
-        for lev in 0..LEVELS {
-            let (tph, r) = most[lev];
+        for row in 0..ROWS {
+            let (tph, r) = most[slot(row)];
             if r == u32::MAX {
                 continue;
             }
             let res = &cap.res[r as usize];
-            out[7 * LEVELS + 5 * lev..7 * LEVELS + 5 * lev + 5].copy_from_slice(&[if tph > 0.0 { 3600.0 / tph } else { f64::INFINITY },cap.wire_kind(r as usize) as f64, if res.node == u32::MAX { -1.0 } else { res.node as f64 }, res.x, res.y]);
+            out[7 * ROWS + 5 * row..7 * ROWS + 5 * row + 5].copy_from_slice(&[if tph > 0.0 { 3600.0 / tph } else { f64::INFINITY },cap.wire_kind(r as usize) as f64, if res.node == u32::MAX { -1.0 } else { res.node as f64 }, res.x, res.y]);
         }
         let worst = cap.bottlenecks(self.w.net.line_count())[line as usize];
-        for lev in 0..LEVELS {
+        for row in 0..ROWS {
+            let lev = slot(row);
             let (rho, r) = worst[lev];
             let wait = self.waiting(line, lev);
             if rho < FULL_RHO || r == u32::MAX || wait <= 0.0 {
@@ -354,9 +397,53 @@ impl TrackApi {
             }
             let res = &cap.res[r as usize];
             let tph = cap.trains(&self.w.net, r as usize, lev);
-            out[7 * lev..7 * lev + 7].copy_from_slice(&[wait, cap.wire_kind(r as usize) as f64, if res.node == u32::MAX { -1.0 } else { res.node as f64 }, res.x, res.y, tph, tph / rho]);
+            out[7 * row..7 * row + 7].copy_from_slice(&[wait, cap.wire_kind(r as usize) as f64, if res.node == u32::MAX { -1.0 } else { res.node as f64 }, res.x, res.y, tph, tph / rho]);
         }
         out
+    }
+
+    /// T-3542: `line_held` per row of the line in the day's order (`line_period_count` rows): `7 *
+    /// n` held numbers, `5 * n` limit numbers, `n` capped headways, laid out as `line_held`'s. A row
+    /// over several slots takes the slot that holds the most trains back, and the tightest limit.
+    pub fn line_row_held(&self, line: u32) -> Vec<f64> {
+        let net = &self.w.net;
+        if !net.line_ok(line) { return vec![] }
+        let rows = net.row_slots(line as usize);
+        let n = rows.len();
+        let mut out = vec![0.0; 13 * n];
+        let cap = &self.w.svc.cap;
+        let most = cap.line_limits(net)[line as usize];
+        let lone = net.line_trains[line as usize].map_or(true, |t| t.iter().any(|&n| n <= 1));
+        let paired = if lone { cap.line_limits_lone(net, false)[line as usize] } else { most };
+        let worst = cap.bottlenecks(net.line_count())[line as usize];
+        // a limit's shortest headway, longest first: infinite for a full stretch
+        let limit_s = |tph: f64| if tph > 0.0 { 3600.0 / tph } else { f64::INFINITY };
+        for (row, (_, slots)) in rows.iter().enumerate() {
+            let tight = slots.iter().copied().filter(|&s| paired[s].1 != u32::MAX).map(|s| limit_s(paired[s].0)).fold(0.0, f64::max);
+            out[12 * n + row] = tight;
+            if let Some(s) = slots.iter().copied().filter(|&s| most[s].1 != u32::MAX).max_by(|&a, &b| limit_s(most[a].0).total_cmp(&limit_s(most[b].0))) {
+                let (tph, r) = most[s];
+                let res = &cap.res[r as usize];
+                out[7 * n + 5 * row..7 * n + 5 * row + 5].copy_from_slice(&[limit_s(tph), cap.wire_kind(r as usize) as f64, if res.node == u32::MAX { -1.0 } else { res.node as f64 }, res.x, res.y]);
+            }
+            let held = slots.iter().copied().map(|s| (s, self.waiting(line, s))).filter(|&(s, w)| worst[s].0 >= FULL_RHO && worst[s].1 != u32::MAX && w > 0.0).max_by(|a, b| a.1.total_cmp(&b.1));
+            if let Some((lev, wait)) = held {
+                let (rho, r) = worst[lev];
+                let res = &cap.res[r as usize];
+                let tph = cap.trains(net, r as usize, lev);
+                out[7 * row..7 * row + 7].copy_from_slice(&[wait, cap.wire_kind(r as usize) as f64, if res.node == u32::MAX { -1.0 } else { res.node as f64 }, res.x, res.y, tph, tph / rho]);
+            }
+        }
+        out
+    }
+
+    /// T-3542: `markers` in demand period `period` (0-4): at the slot serving it.
+    pub fn markers_in(&self, period: usize) -> Vec<f32> {
+        self.markers_at(self.w.net.period_slot()[period.min(4)])
+    }
+    /// T-3542: `full_track` in demand period `period` (0-4).
+    pub fn full_track_in(&self, period: usize) -> Vec<f64> {
+        self.full_track_at(self.w.net.period_slot()[period.min(4)])
     }
 
     /// T-1966: the conflicts the map's train guard holds trains at: `[flat crossings, per crossing:
@@ -418,6 +505,17 @@ impl TrackApi {
         let others = |uses: &dyn Fn(&crate::track::service::Run) -> bool| -> Vec<f64> {
             (0..svc.lines.len()).filter(|&o| o != line as usize && svc.lines[o].ok && uses(&svc.lines[o].runs[0])).map(|o| o as f64).collect()
         };
+        // T-3745: only where something could hold this line's trains: a junction move of its own that
+        // crosses another move some line runs, a crossing with a line on its other edge
+        let pairs = crate::track::capacity::move_conflicts(net, &svc.lines);
+        let used = crate::track::capacity::edges_in_use(&svc.lines);
+        // its moves through junctions over every run, so its other direction's crossing counts too
+        let mut mine = std::collections::HashSet::new();
+        for r in ls.runs.iter().take(ls.live_runs()) {
+            for k in 1..r.nodes.len().saturating_sub(1) {
+                mine.insert((r.nodes[k], r.segs[k - 1], r.segs[k]));
+            }
+        }
         let mut marks: Vec<(f64, [f64; 5], Vec<f64>)> = vec![];
         // a looped route passes a junction or crossing twice: drawn once, at its first pass
         let mut seen_nodes = std::collections::HashSet::new();
@@ -428,6 +526,9 @@ impl TrackApi {
                 continue;
             }
             let s = run.node_s[k];
+            if !pairs.iter().any(|c| c[0] == n && [[c[1], c[2]], [c[3], c[4]]].iter().any(|m| mine.contains(&(n, m[0], m[1])))) {
+                continue;
+            }
             if s <= stop_s[0] || s >= stop_s[stop_s.len() - 1] || !seen_nodes.insert(n) {
                 continue;
             }
@@ -438,6 +539,9 @@ impl TrackApi {
             let mut best: Option<(f64, Vec<f64>)> = None;
             for (own, s_own, other) in [(c.e1, c.s1, c.e2), (c.e2, c.s2, c.e1)] {
                 let Some(j) = run.segs.iter().position(|&p| path_edge(p) == own) else { continue };
+                if used.binary_search(&other).is_err() {
+                    continue;
+                }
                 let len = net.edge_len[own as usize];
                 let s = run.seg_off[j] + if path_dir(run.segs[j]) == 0 { s_own } else { len - s_own };
                 if s <= stop_s[0] || s >= stop_s[stop_s.len() - 1] || best.as_ref().is_some_and(|b| b.0 <= s) {
@@ -465,9 +569,20 @@ impl TrackApi {
     fn push_phases(&self, line: usize, out: &mut Vec<f32>) {
         let Some(l) = self.w.svc.lines.get(line).filter(|l| l.ok) else { return };
         for r in 0..2 {
-            for k in 0..LEVELS {
+            for k in 0..SLOTS {
                 out.extend(l.runs[r].prof[k].phases.iter().flat_map(|p| [p.t as f32, p.s as f32, p.v as f32, p.a as f32]));
+                // T-3346 stage 2: its variants after it, as `profile_meta` counts them
+                if self.w.net.slot_worked(k) {
+                    for x in l.runs[r].vars[k].iter().take(PROFILE_VARS - 1) {
+                        out.extend(x.prof.phases.iter().flat_map(|p| [p.t as f32, p.s as f32, p.v as f32, p.a as f32]));
+                    }
+                }
             }
         }
     }
+}
+
+/// A trip's place in `profile_meta` (T-3346 stage 2: its variant's).
+fn profile_index(t: &crate::track::service::Trip) -> u32 {
+    ((t.line * 2 + t.run as u32) * SLOTS as u32 + t.level as u32) * PROFILE_VARS as u32 + t.var as u32
 }

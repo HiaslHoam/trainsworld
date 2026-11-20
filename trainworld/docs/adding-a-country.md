@@ -22,7 +22,7 @@ output go in `artifacts/trainworld/`. `<kit>` is your own scratchpad folder; `<t
 | `restore.py <task> <stage> [--go]` | puts a backup back (lists without `--go`) |
 | `setbuilt.py <ids> [<check> "<reason>"] [--dry]` | parked rows back to built, optionally relaxing one gate check; `--hold "<reason>"` holds planned or parked rows instead (no run or join takes them) |
 | `stale.py [--cmd <file>]` | market packs naming a place with no pack; writes the .cmd that rewrites them |
-| `checks/market_check.py [--save f] [--against f] [--cells]` | every registered market pack read: array lengths, commute and outing indexes, zones against the file's own sites (and cells); run before and after a join, about 2 minutes, exit 1 on any problem |
+| `<tw>\checks\market_check.py [--save f] [--against f] [--cells]` (in `checks`, not `<tc>`) | every registered market pack read: array lengths, commute and outing indexes, zones against the file's own sites (and cells); run before and after a join, about 2 minutes, exit 1 on any problem |
 | `start_hidden.ps1 <cmd>` | starts a .cmd detached, no window; prints its PID and its children |
 | `waitany.ps1 <pid,pid>` | waits for any of the PIDs to exit |
 
@@ -56,6 +56,10 @@ Take the first that holds; never take a source from memory.
    in its `ZONE_RULES` row and ARCHETYPE C; a built row takes it only when rebuilt (status planned, which clears its
    signal cache), and its `pop_vs_plan` is relaxed with the census figure.
 4. Everything else (jobs by small area, commute flows, travel surveys, schools): not in the first pass.
+
+National figures, every archetype: call `tier0.worldbank(<ISO2>)` and `tier0.tertiary_share(<ISO2>)` for each country
+before the run. A tertiary share of None parks every zone with a campus on `university_rate`: find a national count
+for `tier0.NATIONAL_TERTIARY` (Bolivia's, T-3620), or relax those rows after the gate as Venezuela's (T-3399).
    Record what you found in the register (N, G or ?) and file a P3 task for anything usable.
 
 An official server that refuses scripts: look for a mirror for 15 minutes, then put the URL in the notes
@@ -163,13 +167,13 @@ packs in grey); exit 1 when anything is flagged. Open the picture, fix every FLA
    crossings (Ukraine with Russia and Belarus) a pair factor of 0.
 6. **Machine**: smoke 20 of 20 on your own Vite (`checks/smoke.mjs`; a FAIL here is a stale WASM or
    another agent's edit, and every browser check would park); your Vite's and the run's ports free; disk
-   free at least 15 GB plus twice the biggest extract; nobody else's run, join or terrain job writing
-   `data/packs` or `data/terrain`; cores claimed (`cores.py claim`).
+   free at least 15 GB plus twice the biggest extract; nobody else's run or join writing
+   `data/packs`; cores claimed (`cores.py claim`).
 7. **Sim copy**: `<tc>\setup_sim.py <kit>` (HEAD's sim/ in `<kit>\simroot\sim`, with `data` and `app`
    junctions); `setup_sim.py <kit> check` OK. It prints `TW_SIM_DIR` and `TW_CARGO_TARGET_DIR`: both go in
    every .cmd. `setup_sim.py <kit> refresh` after sim/ is committed again.
-8. **Reused ids** (NOTE reused id): the runner clears a planned row's old per-id caches itself, `data/terrain/<id>.terrain`
-   included (T-1743, T-1986); only a cache it does not list (`world_run.ROW_CACHES`) needs deleting by hand.
+8. **Reused ids** (NOTE reused id): the runner clears a planned row's old per-id caches itself (T-1743, T-1986);
+   only a cache it does not list (`world_run.ROW_CACHES`) needs deleting manually.
 
 9. **Phantom people** (FLAG phantom): a unit with a 1 km GHSL pixel of 20,000 or more that is a spike (its
    eight neighbours average under a fifth of it) in no urban centre, or in one first urban in 2020 or later:
@@ -226,7 +230,7 @@ your whole context.
 Several countries at once: one run each with `--no-join`, its own port and log; one join for all.
 
 The gate's browser check serves a copy of app/ frozen at each gate chunk's start (T-2298, after a mid-gate WASM
-rebuild parked 72 of Russia's rows), so app/ and WASM landings need no hold; writes to data/packs and data/terrain
+rebuild parked 72 of Russia's rows), so app/ and WASM landings need no hold; writes to data/packs
 do, from the first register or retire to the join's end (world-run.md's rules). While
 another run or join holds the packs, `--build-only` builds the rows without registering them; a later run gates them.
 
@@ -242,6 +246,8 @@ Read the batch report and `world_run.py status`. For each parked row:
 | `mean_commute_km` on a zone over 20,000 km² | relax |
 | `pop_vs_plan` on a row with a census hook | relax with the census figure |
 | `browser` failing only "no page errors", every row checked in the same few minutes | the app changed under the gate's Vite (a landing, a WASM rebuild): rerun, no relax |
+| `browser` failing "page.waitForFunction: Timeout" on a rerun too | the row's centre lies in another zone (a border town: Dajabon by Ouanaminthe; a metro's edge: Pucarani's densest pixel on El Alto's), so the zone never becomes the active city: move the origin to the zone's own town (status planned, rebuilt) |
+| `university_rate` near 0 in a country with no tertiary figure (section 1) | relax, naming the missing figure |
 | `browser` (few riders, a purpose missing) | open `world_run/<batch>/gate/<id>-line.png`. The line leaves the town or crosses a border: move the origin (section 3 item 1), never relax. Otherwise relax with what the picture shows |
 | `register failed ... invalid commute between zones` | `<tc>\stale.py --cmd <kit>\fix.cmd`, start the .cmd as in 5 and wait, then `stale.py` again: 0 |
 | a build step error | an old cache (ZeroDivisionError in `osm_signal_line`): delete it. "Failed to open dataset": memory, rerun with fewer jobs. Else a code fault: leave parked, file a task |
@@ -255,7 +261,7 @@ Done when: every row is gated, dead space, or parked with a filed task.
 
 ## 7. Join (once)
 
-Only while no other run, join or terrain job writes `data/packs` or `data/terrain`. Claim at least 6
+Only while no other run or join writes `data/packs`. Claim at least 6
 cores (a join on 2 timed out). A country whose built packs sum over 400,000 gravity zones (each pack's `zones` in
 `data/packs/<id>.json`; Brazil's 177 rows held 934,191) is refused by the solve and every row parks: before the join,
 give it `world_plan.SOLVE_REGIONS` (first-level units to regions of at most about 300,000, twin cities inside one),
@@ -278,12 +284,10 @@ Done when: `world_run.py status` shows the country's gated rows shipped.
 - Load check on the biggest metro and one rural zone: `ROWS=<kit>\rows.json node <tw>\checks\city-browser.mjs`
   (rows from `world_run/<batch>/gate/<id>.row.json`) on your Vite: PASS, and the `-line.png` opened: the
   line runs through the town.
-- Terrain and routed drives, which the join does not make: `<tw>\pipeline\terrain_fine.py blocks <kit>\blocks.json`,
-  then `terrain_fine.py run <kit>\blocks.json <tw>\data\work\terrain-fine --jobs 1 --fetch 8` (only the blocks its
-  manifest lacks, a new part tar; Southeast Asia's 3.6 GB took 12 minutes from home), then `zone_terrain.py build
-  --jobs N` (zones with no file only) and `market_drives.py build --jobs N` (the new places only); these three run
-  without `-I`. Then `<tw>\checks\build_inputs.py`: no FLAG (the files a production build copies, and a routed-drive
-  place for every zone).
+- `<tw>\checks\build_inputs.py`: no FLAG (the files a production build copies, and a routed-drive place for every
+  zone). The join routes the new zones' drives itself (`join.drives.log`); terrain needs no step (the world's blocks,
+  T-2901). After a "routed drives not rebuilt" problem in the join's report: `<tw>\pipeline\world_run.py step
+  market_drives build --jobs N`.
 - Start tiers: a start missing from `app/src/game/start-difficulty.json` shows as hard, so after the join run
   `venv\Scripts\python.exe trainworld\pipeline\start_difficulty.py --fresh --jobs N` (claim N cores; about 20 minutes)
   and check the country's big cities are not all hard (docs/zones.md "Start tiers").

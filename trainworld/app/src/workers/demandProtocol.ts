@@ -1,10 +1,11 @@
 import type { CityId } from "../game/cities";
 import type { CorridorBook, CorridorRows } from "../game/demand";
 import type { FrameSpec } from "../game/frame";
+import type { FareArea } from "../game/fareCurve";
 import { PERIODS } from "../game/periods";
 
 /** `DemandApi.trip`'s answer layout (sim/src/demand/trip.rs `HEAD`, `PAIR_LEN`, `LEG_LEN`). */
-export const TRIP_LAYOUT = { HEAD: 48, PAIR_LEN: 20, LEG_LEN: 14 } as const;
+export const TRIP_LAYOUT = { HEAD: 48, PAIR_LEN: 20, LEG_LEN: 15 } as const;
 /** `IntercityApi::market_trip`'s answer: `MT_HEAD` and `MT_PAIR_LEN` in market_trip.rs. */
 export const MARKET_TRIP_LAYOUT = { HEAD: 25, PAIR_LEN: 7 } as const;
 // Messages between the main thread and the demand workers (T-026, T-021; notes/T-026.md).
@@ -51,7 +52,17 @@ export interface DemandNetwork {
   tph: Float32Array;
   /** cars per train, per line */
   cars: Float32Array;
-  fare: { base: number; perKm: number; nodes?: [number, number][]; scales?: Record<string, number>; hsr?: number; ferry?: number; bus?: number; transfer?: number; lines?: Record<string, number> };
+  fare: { base: number; perKm: number; nodes?: [number, number][]; scales?: Record<string, number>; hsr?: number; ferry?: number; bus?: number; transfer?: number; lines?: Record<string, number>; zones?: FareArea[] };
+  /** T-3740 (`DemandApi.set_fare_zones`): each station's fare zone code (game/fareZones.ts, the fare area's id), 0
+   * for none; absent where none has one */
+  fz?: Uint32Array;
+  /** T-3758 (`set_fare_zones`): per route node (as `hopKm`) 1 where its line pays the distance fare; absent with no
+   * `fz` or none */
+  fzDist?: Uint8Array;
+  /** T-3758: per route node the fare zone codes of the stations its trains pass to the next stop without stopping,
+   * `fzPass[fzPassOff[r]..fzPassOff[r + 1]]`; absent with no `fz` or none */
+  fzPassOff?: Uint32Array;
+  fzPass?: Uint32Array;
   /** km per route node: each line's forward stops then reverse stops, 0 at each end */
   hopKm: Float32Array;
   /** T-1626 (`DemandApi.set_fare_mul`): each route node's fare multiplier, as `hopKm`; absent: all 1 */
@@ -59,6 +70,12 @@ export interface DemandNetwork {
   /** T-3578 (`DemandApi.set_base_mul`): each route node's line's own fare multiplier, which the base takes
    * too, as `hopKm`; absent: all 1 */
   baseW?: Float32Array;
+  /** T-3748, T-3753: each population's curve extra and base extra come back in its own dollars (the market's in the
+   * curve's, a city's at its country's multiple); each route node's is charged at the multiple of the stop it leaves,
+   * `fareS` the extra's and `baseS` the base's (`stopFareScales`), as `hopKm`. Read only by the figures' sums, never
+   * sent to a solve; absent: all 1 */
+  fareS?: Float32Array;
+  baseS?: Float32Array;
   /** T-842 (`DemandApi.set_span`): per period and route node (`q * route nodes + r`, route nodes
    * as `hopKm`), the share of riders with a train due within their tolerance; empty or absent:
    * 1 everywhere */
@@ -221,7 +238,7 @@ export type ToDemand =
   | { kind: "rows"; id: number; key: string; place: number }
   /** T-1174, dev server only (`twDemand.client.debugPanic`): make this worker's WASM panic, `now`
    * or in the running solve's next step */
-  | { kind: "debugPanic"; when: "now" | "solve"; oom?: boolean }
+  | { kind: "debugPanic"; when: "now" | "solve" | "stall"; oom?: boolean }
   /** T-1205: the pool has shrunk: this worker's periods from now on (`init`'s `periods`, `groups`) */
   | { kind: "periods"; periods: number[]; groups?: number[][]; markets?: number[]; share?: boolean }
   /** T-1607: a period's loads from the worker solving the other side of it (`FromDemand` "loads") */
@@ -446,6 +463,9 @@ export type FromDemand =
    * none once one has ended); `ran`, `ranExp` and `ranN`, this solve's units ended with one, their ms as run
    * and as expected and how many; `viewLeft`, `viewBlind` and `curView` the same for the units before the
    * zone in view's figures; `leftQ`, `ranQ`, `expQ`, `nQ` and `curQ` the whole solve's by period */
+  /** T-3781: a barrier solve's period `period` of round `round` started here (its `result` ends it); a report's
+   * diagnosis names the period a quiet worker is in */
+  | { kind: "unit"; version: number; round: number; period: number }
   | { kind: "work"; version: number; stage: 0 | 1; busy: boolean; done: [number, number]; of: [number, number]; unitMs: [number, number]; left: [number, number]; blind: [number, number]; cur: number | null; curSize: number; sizeMs: [number, number]; ran: [number, number]; ranExp: [number, number]; ranN: [number, number]; viewLeft: [number, number]; viewBlind: [number, number]; curView: boolean; leftQ: number[]; ranQ: number[]; expQ: number[]; nQ: number[]; curQ: number }
   | { kind: "done"; version: number; memBytes: number; heap?: Heap; clusters?: [number, number]; periods?: [number, number]; local?: CityId[] }
   /** a worker's `sub_sums` for one city once all its periods have `round` (sent unasked, T-119);

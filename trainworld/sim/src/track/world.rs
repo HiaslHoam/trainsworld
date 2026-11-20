@@ -3,13 +3,15 @@
 //! derived from it, and the undo history.
 
 use super::capacity::ResKind;
-use super::net::{path_edge, weekend_headway, EdgeData, Issue, LineData, Network, NodeData, StationData, Weekend};
+use super::net::{path_edge, weekend_headway, EdgeData, Extra, Issue, LineData, Network, NodeData, StationData, Weekend};
 use super::params::*;
 use super::service::{Service, ServiceDirty};
 use super::twin::Twin;
 
 /// A line's trains, rates and stop-to-stop times (by run, then level), as demand reads them.
-type DemandView = (Option<[u32; 3]>, [f32; 3], [Vec<Vec<f64>>; 2]);
+type DemandView = (Option<[u32; 5]>, [f32; SLOTS], [Vec<Vec<f64>>; 2]);
+/// The weekdays' trains, headways and midday and afternoon rows, put back after a weekend settle.
+type WeekdayRows = (Vec<Option<[u32; ROWS]>>, Vec<Option<[u32; ROWS]>>, Vec<Extra>);
 
 /// One edit. The primitive setters replace an object whole (`None` removes it); `Split` and
 /// `DeleteEdge` expand into primitives when applied. Every applied op yields its inverse, which
@@ -23,13 +25,21 @@ pub enum Op {
     /// Tests only: a line at these trains per hour, without trains; the next settle allocates the
     /// whole trains that rate needs (T-1146).
     #[cfg(test)]
-    Schedule { id: u32, tph: [f32; 3] },
-    TrainCounts { id: u32, trains: Option<[u32; 3]>, tph: [f32; 3] },
+    Schedule { id: u32, tph: [f32; ROWS] },
+    TrainCounts { id: u32, trains: Option<[u32; ROWS]>, tph: [f32; ROWS] },
     /// T-625: set a line's headways in seconds per level (`None`: counts set by hand) with the
     /// counts it starts from; the settle then keeps the counts to the headways.
-    AutoTrains { id: u32, auto: Option<[u32; 3]>, trains: Option<[u32; 3]> },
+    AutoTrains { id: u32, auto: Option<[u32; ROWS]>, trains: Option<[u32; ROWS]> },
     /// T-3521: set a line's weekend trains (`LineData::weekend`).
     Weekend { id: u32, weekend: Weekend },
+    /// T-3542: the rows (3, 4 or 5) the game's lines set their trains in (`line` None), or line
+    /// `line`'s own (0: the game's). `TrackWorld::rows_ops` adds what a switch does to the counts.
+    Rows { line: Option<u32>, rows: u8 },
+    /// T-3542: set a line's midday and afternoon rows (`LineData::x`).
+    Extra { id: u32, x: Extra },
+    /// T-3542: the hours (`params::Cuts`) the game's lines split their day at (`line` None), or
+    /// line `line`'s own (all 0: the game's).
+    Hours { line: Option<u32>, cuts: Cuts },
     /// Split `edge` at chainage `s` with a new node `node`; the far part becomes `new_edge`.
     /// Line paths through it are rewritten. Geometry does not change.
     Split { edge: u32, s: f64, node: u32, new_edge: u32 },
@@ -147,7 +157,7 @@ pub struct TrackWorld {
     /// T-752: a line switching between counts and headways, whose counts this edit's settle keeps,
     /// and the levels it had no trains at (T-849: they take the headway's count, which the track
     /// trims as any headway line's)
-    switching: Option<(u32, [bool; LEVELS])>,
+    switching: Option<(u32, [bool; 5])>,
     /// T-1863: the lines an edit's settle may step: those sharing track, directly or through others,
     /// with what the edit changed. None settles every line off its fleet (a load, a bulk edit).
     settle_scope: Option<Vec<bool>>,
@@ -155,9 +165,9 @@ pub struct TrackWorld {
     /// the levels they ran no trains at before it (every level of a line the edit made or brought
     /// back): no fill has given them a share there, so being short on full track does not settle them
     /// in the edit's first settle (`settle_unpaced`, up to its trim). Empty outside an edit.
-    settle_edited: Vec<(u32, [bool; LEVELS])>,
+    settle_edited: Vec<(u32, [bool; SLOTS])>,
     /// T-3482: `settle_edited` for the weekends' settle (`settle_weekend`), by the weekend rates.
-    settle_edited_rest: Vec<(u32, [bool; LEVELS])>,
+    settle_edited_rest: Vec<(u32, [bool; SLOTS])>,
     /// T-3521: the weekend service (`settle_weekend`) where weekends were settled on their own; not
     /// saved. None: worked out again from the weekdays' at the next weekend settle.
     svc_rest: Option<Box<Service>>,
@@ -165,8 +175,12 @@ pub struct TrackWorld {
     /// weekend service is worked out at the first edit that settles them.
     weekend_as_saved: bool,
     /// T-3388: per line and level, what `pace_merges` last paced it from. Not saved: a load takes
-    /// the saved pacing as it is. Weekdays' only: the weekends run the weekdays' pacing.
-    pace_in: Vec<[PaceIn; LEVELS]>,
+    /// the saved pacing as it is.
+    pace_in: Vec<[PaceIn; SLOTS]>,
+    /// T-3584: the weekends' pacing and what it was paced from, kept with `svc_rest` (the weekdays'
+    /// start them at the first weekend settle). Not saved.
+    pub(crate) pace_rest: Vec<[f32; SLOTS]>,
+    pace_in_rest: Vec<[PaceIn; SLOTS]>,
 }
 
 /// Why an edit that changes what is constructed was refused.
@@ -179,7 +193,7 @@ pub enum ChargeError {
 
 impl TrackWorld {
     pub fn new(net: Network) -> TrackWorld {
-        let mut w = TrackWorld { net, svc: Service::default(), undo: vec![], redo: vec![], switching: None, settle_scope: None, settle_edited: vec![], settle_edited_rest: vec![], svc_rest: None, weekend_as_saved: false, pace_in: vec![] };
+        let mut w = TrackWorld { net, svc: Service::default(), undo: vec![], redo: vec![], switching: None, settle_scope: None, settle_edited: vec![], settle_edited_rest: vec![], svc_rest: None, weekend_as_saved: false, pace_in: vec![], pace_rest: vec![], pace_in_rest: vec![] };
         w.reload();
         w
     }
@@ -211,6 +225,100 @@ impl TrackWorld {
             self.pin_twin_phases();
             self.net.phases_placed = true;
         }
+        self.retime();
+    }
+
+    /// T-3346 stage 2: each train's own timetable worked out again (`timing::retime`), once the
+    /// service has settled and the departures are placed.
+    pub fn retime(&mut self) {
+        super::timing::retime(&self.net, &mut self.svc);
+    }
+
+    /// T-3542: after an edit split or joined the slots (`Network::refresh_slots`, from `old`): the
+    /// slots it split off start from what their periods ran (`Network::seed_slots`), those it joined
+    /// go back to as made, and everything is worked out again as a load with saved rates does, the
+    /// rates and pacing taken as they stand and the departures kept. The weekends keep their rates
+    /// until the next edit settles them, as after a load (London's weekends at 70% took 9 s natively).
+    fn reslot(&mut self, old: [usize; 5]) {
+        self.net.seed_slots(old);
+        let settled = self.net.rates_settled;
+        (self.net.rates_from_save, self.net.pace_from_save, self.net.phases_placed) = (settled, settled, true);
+        // trains already running keep their patterns (each era carries its own slots)
+        let (eras, shifts) = (std::mem::take(&mut self.svc.eras), std::mem::take(&mut self.svc.shifts));
+        self.reload();
+        (self.svc.eras, self.svc.shifts) = (eras, shifts);
+    }
+
+    /// T-3542: the edit that sets the game's rows (`line` None) or line `line`'s own (0: the game's)
+    /// to `rows`, with what the switch does to each line it moves: a row split in two gives both its
+    /// trains (and headway); rows joined into one take the most trains of them (the shortest headway),
+    /// so no period quietly loses service. Weekend counts set by hand alike. None if nothing changes.
+    pub fn rows_ops(&self, line: Option<u32>, rows: u8) -> Option<Op> {
+        let net = &self.net;
+        let now = match line { None => net.rows_default, Some(l) => *net.line_rows.get(l as usize)? };
+        if now == rows {
+            return None;
+        }
+        let mut ops = vec![Op::Rows { line, rows }];
+        // a line back to the game's rows takes the game's hours too; one taking its own rows keeps
+        // the game's hours as its own, so the game's next hours leave it as it is
+        let own_hours = |l: u32| net.line_x.get(l as usize).is_some_and(|x| x.hours != [0; 5]);
+        let hours_after = match (line, rows) {
+            (Some(l), 0) if own_hours(l) => Some([0; 5]),
+            (Some(l), _) if rows != 0 && !own_hours(l) && net.line_rows.get(l as usize) == Some(&0) => Some(net.hours_default),
+            _ => None,
+        };
+        if let Some(cuts) = hours_after { ops.push(Op::Hours { line, cuts }); }
+        // a line's rows after the edit
+        let after = |l: usize| -> usize {
+            let own = if line.is_some() { rows } else { net.line_rows[l] };
+            let game = if line.is_none() { rows } else { net.rows_default };
+            (if own == 0 { game } else { own } as usize).clamp(ROWS_MIN, ROWS_MAX)
+        };
+        let lines: Vec<u32> = (0..net.line_count() as u32).filter(|&l| net.line_ok(l) && !net.is_twin(l) && match line {
+            None => net.line_rows[l as usize] == 0,
+            Some(id) => l == id,
+        }).collect();
+        for l in lines {
+            let (i, from) = (l as usize, net.rows(l as usize));
+            let to = after(i);
+            if from == to { continue; }
+            // each new row's value from the old places of its periods: the most, or the shortest
+            // headway that is some
+            let remap = |p: [u32; 5], most: bool| -> [u32; 5] {
+                let mut out = p;
+                for &k in ROW_PLACES[to - ROWS_MIN] {
+                    let olds = (0..5).filter(|&q| PERIOD_PLACE[to - ROWS_MIN][q] == k).map(|q| p[PERIOD_PLACE[from - ROWS_MIN][q]]);
+                    out[k] = if most { olds.max().unwrap_or(0) } else { olds.filter(|&h| h > 0).min().unwrap_or(0) };
+                }
+                out
+            };
+            let Some(d) = net.line_data(l) else { continue };
+            let mut x = d.x;
+            if let Some(c) = hours_after { x.hours = c; }
+            if let Some(t) = net.trains_of(i) {
+                let (m, tx) = unplace(remap(t, true));
+                x.trains = tx;
+                match net.auto_of(i) {
+                    Some(a) => {
+                        let (am, ax) = unplace(remap(a, false));
+                        x.auto = ax;
+                        ops.push(Op::AutoTrains { id: l, auto: Some(am), trains: Some(m) });
+                    }
+                    None => ops.push(Op::TrainCounts { id: l, trains: Some(m), tph: d.tph }),
+                }
+            }
+            if let Some(c) = d.weekend.counts {
+                let (m, cx) = unplace(remap(places(c, x.weekend_counts), true));
+                let (h, hx) = unplace(remap(places(d.weekend.headways, x.weekend_headways), false));
+                (x.weekend_counts, x.weekend_headways) = (cx, hx);
+                ops.push(Op::Weekend { id: l, weekend: Weekend { counts: Some(m), headways: h, ..d.weekend } });
+            }
+            if x != d.x {
+                ops.push(Op::Extra { id: l, x });
+            }
+        }
+        Some(Op::Batch(ops))
     }
 
     /// T-1925: place `lines`' departures (`spacing::place`) into `Network::line_phase`, and where
@@ -232,6 +340,7 @@ impl TrackWorld {
         self.svc.update(&self.net, &buses, &[], false);
         self.svc_rest = None;
         self.settle_train_counts(!self.net.rates_from_save);
+        self.retime();
     }
 
     /// Solve headways from a fixed whole-line fleet and the capacity-adjusted round trip.
@@ -248,10 +357,11 @@ impl TrackWorld {
         let mut any = false;
         for l in 0..self.net.line_count() {
             if !self.net.line_ok(l as u32) || self.net.line_trains[l].is_some() { continue; }
-            self.net.line_trains[l] = Some(self.svc.lines.get(l).filter(|s| s.ok).map_or([0; 3], |s| s.trains));
+            let t = self.svc.lines.get(l).filter(|s| s.ok).map_or([0; 5], |s| self.net.places_most(l, s.trains));
+            self.net.set_trains_of(l, Some(t));
             any = true;
         }
-        if any { self.settle_train_counts(true); }
+        if any { self.settle_train_counts(true); self.retime(); }
         any
     }
 
@@ -348,24 +458,24 @@ impl TrackWorld {
                 continue;
             }
             if let Some(u) = cap.users_of(r).first().filter(|u| (u.line as usize) < n) {
-                for lev in (0..LEVELS).filter(|&lev| cap.rho[r][lev] >= PACE_FULL_RHO) {
+                for lev in self.net.slots().filter(|&lev| cap.rho[r][lev] >= PACE_FULL_RHO) {
                     full.push((top(&mut root, u.line as usize), lev));
                 }
             }
         }
-        let was: Vec<[f32; LEVELS]> = (0..n).map(|l| self.net.line_pace_of(l as u32)).collect();
-        let mut pace = vec![[0.0f32; LEVELS]; n];
+        let was: Vec<[f32; SLOTS]> = (0..n).map(|l| self.net.line_pace_of(l as u32)).collect();
+        let mut pace = vec![[0.0f32; SLOTS]; n];
         let mut groups: std::collections::BTreeMap<usize, Vec<usize>> = Default::default();
         for l in (0..n).filter(|&l| met[l]) {
             let g = top(&mut root, l);
             groups.entry(g).or_default().push(l);
         }
-        self.pace_in.resize(n, [PaceIn::default(); LEVELS]);
+        self.pace_in.resize(n, [PaceIn::default(); SLOTS]);
         for lines in groups.values() {
             let g = top(&mut root, lines[0]);
             // lines are pushed in id order, so the first is the group's least
             let group = (lines[0] as u32, lines.len() as u32);
-            for lev in 0..LEVELS {
+            for lev in self.net.slots() {
                 let is_full = full.contains(&(g, lev));
                 // (headway, line, set by the player, the set it was in when last paced: NO_SET
                 // when it has moved since); a count line's headway within `PACE_HOLD` of the one it
@@ -373,18 +483,20 @@ impl TrackWorld {
                 let mut hs: Vec<(f64, usize, bool, u32)> = vec![];
                 for &l in lines {
                     let ls = &self.svc.lines[l];
-                    if !self.net.line_ok(l as u32) || !ls.ok || !ls.running || ls.is_loop() || ls.is_bus() {
+                    // T-3542: a slot its hours share between rows runs no one headway to pace
+                    if !self.net.line_ok(l as u32) || !ls.ok || !ls.running || ls.is_loop() || ls.is_bus() || self.net.mixed(l, lev).is_some() {
                         continue;
                     }
                     let last = self.pace_in[l][lev];
-                    if let Some(a) = self.net.line_auto[l] {
-                        if a[lev] > 0 {
-                            let h = a[lev] as f64;
+                    let c = self.net.trains_at(l, lev);
+                    if let Some(a) = self.net.auto_at(l, lev) {
+                        if a > 0 {
+                            let h = a as f64;
                             hs.push((h, l, true, if last.h == h { last.set } else { NO_SET }));
                         }
-                    } else if let Some(c) = self.net.line_trains[l] {
-                        if c[lev] > 0 && ls.round_trip[lev] > 0.0 {
-                            let h = ls.round_trip[lev] / c[lev] as f64;
+                    } else if self.net.line_trains[l].is_some() {
+                        if c > 0 && ls.round_trip[lev] > 0.0 {
+                            let h = ls.round_trip[lev] / c as f64;
                             let keeps = was[l][lev] == 0.0 || h <= was[l][lev] as f64;
                             if !adopt && last.fresh && last.h > 0.0 && keeps {
                                 // just paced: its headway moved with its own pacing, which is what
@@ -535,23 +647,26 @@ impl TrackWorld {
         let mut moved = false;
         let most = self.svc.cap.line_limits(&self.net);
         for l in 0..self.net.line_count() {
-            let (Some(auto), Some(old)) = (self.net.line_auto[l], self.net.line_trains[l]) else { continue };
+            let (Some(auto), Some(old)) = (self.net.auto_of(l), self.net.trains_of(l)) else { continue };
             if !self.net.line_ok(l as u32) || !self.svc.lines[l].ok { continue; }
             // T-752: a switch to headways keeps the trains the line has; T-849: a level with none
             // takes its headway's count, or a new line switched straight to headways never runs,
             // and follows its round trip as any headway line's (T-3482)
-            let keep = match self.switching { Some((s, empty)) if s == l as u32 => empty.map(|e| !e), _ => [false; LEVELS] };
+            let keep = match self.switching { Some((s, empty)) if s == l as u32 => empty.map(|e| !e), _ => [false; 5] };
             let trip = self.svc.lines[l].round_trip;
             // a loop's two directions each keep the headway with half its trains (T-798)
             let each = if self.svc.lines[l].paired() { 2 } else { 1 };
             let mut counts = old;
-            for lev in (0..LEVELS).filter(|&lev| !keep[lev]) {
-                let t = trip[lev] / each as f64;
-                let want = each * clamp_auto(auto_trains(t, auto[lev]), t, auto[lev], most[l][lev].0);
-                if want < old[lev] || !last { counts[lev] = want; }
+            for (k, slots) in self.net.row_slots(l).into_iter().filter(|(k, _)| !keep[*k]) {
+                // T-3542: a row over several slots takes the most any of them needs
+                let want = slots.iter().map(|&lev| {
+                    let t = trip[lev] / each as f64;
+                    each * clamp_auto(auto_trains(t, auto[k]), t, auto[k], most[l][lev].0)
+                }).max().unwrap_or(0);
+                if want < old[k] || !last { counts[k] = want; }
             }
             if counts != old {
-                self.net.line_trains[l] = Some(counts);
+                self.net.set_trains_of(l, Some(counts));
                 moved = true;
             }
         }
@@ -565,17 +680,22 @@ impl TrackWorld {
         let mut trimmed = false;
         let worst = self.svc.cap.bottlenecks(self.net.line_count());
         for l in 0..self.net.line_count() {
-            let (Some(_), Some(mut counts)) = (self.net.line_auto[l], self.net.line_trains[l]) else { continue };
+            let (Some(_), Some(mut counts)) = (self.net.line_auto[l], self.net.trains_of(l)) else { continue };
             if !self.net.line_ok(l as u32) || !self.svc.lines[l].ok { continue; }
-            let empty = match self.switching { Some((s, e)) if s == l as u32 => e, Some(_) | None => [true; LEVELS] };
+            let empty = match self.switching { Some((s, e)) if s == l as u32 => e, Some(_) | None => [true; 5] };
             let trip = self.svc.lines[l].round_trip;
-            for lev in (0..LEVELS).filter(|&lev| empty[lev] && worst[l][lev].0 <= 2.0 - FULL_RHO) {
-                let short = self.net.running_trains(l, lev, trip[lev]) - self.net.line_tph[l][lev] as f64 * trip[lev] / 3600.0;
-                let mut held = if short > 0.01 { short.floor() as u32 } else { 0 };
-                if self.svc.lines[l].paired() { held &= !1; }
-                if held > 0 { counts[lev] -= held.min(counts[lev]); trimmed = true; }
+            for (k, slots) in self.net.row_slots(l).into_iter().filter(|(k, _)| empty[*k]) {
+                // T-3542: a row over several slots keeps what its busiest needs: the fewest any of
+                // them leaves waiting (none where its track is over full)
+                let held = slots.iter().map(|&lev| {
+                    if worst[l][lev].0 > 2.0 - FULL_RHO { return 0; }
+                    let short = self.net.running_trains(l, lev, trip[lev]) - self.net.line_tph[l][lev] as f64 * trip[lev] / 3600.0;
+                    let held = if short > 0.01 { short.floor() as u32 } else { 0 };
+                    if self.svc.lines[l].paired() { held & !1 } else { held }
+                }).min().unwrap_or(0);
+                if held > 0 { counts[k] -= held.min(counts[k]); trimmed = true; }
             }
-            self.net.line_trains[l] = Some(counts);
+            self.net.set_trains_of(l, Some(counts));
         }
         trimmed
     }
@@ -583,49 +703,67 @@ impl TrackWorld {
     /// T-3521: a line's whole trains on weekends (`LineData::weekend`) where they differ from its
     /// weekday counts; None where it runs those. A share scales the counts up to whole trains, or a
     /// headway line's headways (`weekend_headway`) over its weekday round trip.
-    pub fn weekend_counts(&self, l: usize) -> Option<[u32; 3]> {
+    pub fn weekend_counts(&self, l: usize) -> Option<[u32; ROWS]> {
+        self.weekend_places(l).map(|c| unplace(c).0)
+    }
+
+    /// T-3542: `weekend_counts` at the line's five places (`params::places`).
+    pub fn weekend_places(&self, l: usize) -> Option<[u32; 5]> {
         let mut most = None;
         self.weekend_counts_in(l, &mut most)
     }
 
-    /// `weekend_counts` with the track's limits per line (`line_limits`) worked out once into `most`
+    /// `weekend_places` with the track's limits per line (`line_limits`) worked out once into `most`
     /// for every line after it.
-    fn weekend_counts_in(&self, l: usize, most: &mut Option<Vec<[(f64, u32); 3]>>) -> Option<[u32; 3]> {
-        let t = self.net.line_trains.get(l).copied().flatten()?;
+    fn weekend_counts_in(&self, l: usize, most: &mut Option<Vec<[(f64, u32); SLOTS]>>) -> Option<[u32; 5]> {
+        let t = self.net.trains_of(l)?;
         // a headway line runs its weekend headway even on its weekday count of trains, which then
         // stand longer at the ends
-        let own_headway = self.weekend_auto(l) != self.net.line_auto.get(l).copied().flatten();
-        let c = match self.net.line_weekend.get(l).copied().unwrap_or_default() {
-            Weekend { counts: Some(c), .. } => c,
+        let own_headway = match (self.weekend_auto(l), self.net.auto_of(l)) {
+            (Some(a), Some(b)) => !self.net.same_places(l, a, b),
+            (a, b) => a.is_some() != b.is_some(),
+        };
+        let x = self.net.line_x[l];
+        let mut c = t;
+        match self.net.line_weekend.get(l).copied().unwrap_or_default() {
+            Weekend { counts: Some(m), .. } => c = places(m, x.weekend_counts),
             Weekend { share: 100, .. } => return None,
-            Weekend { share: p, .. } => match (self.net.line_auto[l], self.svc.lines.get(l)) {
+            Weekend { share: p, .. } => match (self.net.auto_of(l), self.svc.lines.get(l)) {
                 (Some(auto), Some(ls)) => {
                     // a loop's two directions each keep the headway with half its trains (T-798),
                     // and no more than the track lets run, as the weekdays' (`auto_counts`)
                     let each = if ls.paired() { 2 } else { 1 };
                     let most = most.get_or_insert_with(|| self.svc.cap.line_limits(&self.net));
-                    // under 100% never more than the weekdays run (a full track trims those, T-625)
-                    std::array::from_fn(|lev| {
-                        let (rt, h) = (ls.round_trip[lev] / each as f64, weekend_headway(auto[lev], p));
-                        let n = each * clamp_auto(auto_trains(rt, h), rt, h, most.get(l).map_or(f64::INFINITY, |m| m[lev].0));
-                        if p <= 100 { n.min(t[lev]) } else { n }
-                    })
+                    // under 100% never more than the weekdays run (a full track trims those, T-625);
+                    // a row over several slots the most any of them needs (T-3542)
+                    for (k, slots) in self.net.row_slots(l) {
+                        let h = weekend_headway(auto[k], p);
+                        let n = slots.iter().map(|&lev| {
+                            let rt = ls.round_trip[lev] / each as f64;
+                            each * clamp_auto(auto_trains(rt, h), rt, h, most.get(l).map_or(f64::INFINITY, |m| m[lev].0))
+                        }).max().unwrap_or(0);
+                        c[k] = if p <= 100 { n.min(t[k]) } else { n };
+                    }
                 }
-                _ => t.map(|x| (x as u64 * p as u64).div_ceil(100).min(u32::MAX as u64) as u32),
+                _ => for (k, _) in self.net.row_slots(l) { c[k] = (t[k] as u64 * p as u64).div_ceil(100).min(u32::MAX as u64) as u32 },
             },
         };
-        (c != t || own_headway).then_some(c)
+        (!self.net.same_places(l, c, t) || own_headway).then_some(c)
     }
 
     /// T-3521: a headway line's headways on weekends (`line_auto` while the weekends settle): the
     /// weekdays' at its percent (`weekend_headway`), none where its weekend counts are set by hand
     /// (they run as a count line's, bar the headways stepped to, T-3557). None for a count line.
-    pub(crate) fn weekend_auto(&self, l: usize) -> Option<[u32; 3]> {
-        let a = self.net.line_auto.get(l).copied().flatten()?;
+    /// At the line's five places (`params::places`).
+    pub(crate) fn weekend_auto(&self, l: usize) -> Option<[u32; 5]> {
+        let a = self.net.auto_of(l)?;
         match self.net.line_weekend.get(l).copied().unwrap_or_default() {
             // a headway stepped to by hand keeps the cap on the trains set to run it (T-3557); a level
             // without one runs as a count line
-            Weekend { counts: Some(_), headways, .. } => (headways != [0; 3]).then_some(headways),
+            Weekend { counts: Some(_), headways, .. } => {
+                let h = places(headways, self.net.line_x[l].weekend_headways);
+                (!self.net.same_places(l, h, [0; 5])).then_some(h)
+            }
             Weekend { share: 100, .. } => Some(a),
             Weekend { share: p, .. } => Some(a.map(|h| weekend_headway(h, p))),
         }
@@ -633,17 +771,25 @@ impl TrackWorld {
 
     /// T-3521: the weekends' headways in `line_auto` for the lines in `own` (`weekend_own`), so
     /// whatever reads a line's headway (`running_trains`, `Service::spare`, `pattern_tph`) reads the
-    /// weekends'; returns the weekdays' to put back.
-    fn swap_in_weekend_autos(&mut self, own: &[(usize, [u32; 3])]) -> Vec<Option<[u32; 3]>> {
-        let week = self.net.line_auto.clone();
-        for &(l, _) in own {
-            if week[l].is_some() { self.net.line_auto[l] = self.weekend_auto(l); }
+    /// weekends'; and their trains in `line_trains`. Returns the weekdays' headways, trains and
+    /// midday and afternoon rows to put back (`put_back_weekdays`).
+    fn swap_in_weekend(&mut self, own: &[(usize, [u32; 5])]) -> WeekdayRows {
+        let week = (self.net.line_trains.clone(), self.net.line_auto.clone(), self.net.line_x.clone());
+        for &(l, c) in own {
+            let auto = week.1[l].is_some().then(|| self.weekend_auto(l)).flatten();
+            self.net.set_trains_of(l, Some(c));
+            if week.1[l].is_some() { self.net.set_auto_of(l, auto); }
         }
         week
     }
 
+    /// `swap_in_weekend` undone.
+    fn put_back_weekdays(&mut self, week: WeekdayRows) {
+        (self.net.line_trains, self.net.line_auto, self.net.line_x) = week;
+    }
+
     /// T-3521: each line's weekend counts where they differ from its weekday ones (`weekend_counts`).
-    pub fn weekend_own(&self) -> Vec<(usize, [u32; 3])> {
+    pub fn weekend_own(&self) -> Vec<(usize, [u32; 5])> {
         if !self.net.any_weekend() {
             return vec![];
         }
@@ -665,16 +811,13 @@ impl TrackWorld {
             return;
         }
         let own = self.weekend_own();
-        let week_trains = self.net.line_trains.clone();
-        for &(l, c) in &own { self.net.line_trains[l] = Some(c); }
-        let week_auto = self.swap_in_weekend_autos(&own);
+        let week = self.swap_in_weekend(&own);
         std::mem::swap(&mut self.net.line_tph, &mut self.net.line_tph_rest);
         if let Some(rest) = self.svc_rest.as_mut() {
             rest.update_scoped(&self.net, lines, schedules, cap_dirty, Some((edges, nodes)));
         }
         std::mem::swap(&mut self.net.line_tph, &mut self.net.line_tph_rest);
-        self.net.line_trains = week_trains;
-        self.net.line_auto = week_auto;
+        self.put_back_weekdays(week);
     }
 
     /// T-3521: weekends' settle, after the weekdays' (`settle_train_counts`), where some line runs
@@ -699,7 +842,6 @@ impl TrackWorld {
             self.net.settle_kept_rest.clear();
             self.svc_rest = None;
         } else {
-            let week_trains = self.net.line_trains.clone();
             let week_tph = self.net.line_tph.clone();
             let week_kept = std::mem::replace(&mut self.net.settle_kept, std::mem::take(&mut self.net.settle_kept_rest));
             let settled = self.net.rates_settled;
@@ -715,31 +857,51 @@ impl TrackWorld {
             if before.1 {
                 for l in 0..n { self.net.line_tph[l] = self.net.line_tph_rest[l]; }
             }
-            for &(l, c) in &own { self.net.line_trains[l] = Some(c); }
-            let week_auto = self.swap_in_weekend_autos(&own);
+            let week = self.swap_in_weekend(&own);
             // the service (round trips, holds, how full each track is) on the weekends' rates before
             // the settle reads it: on the weekdays' a track full on weekdays held every line on it
             if fresh {
                 let moved: Vec<u32> = (0..n as u32).filter(|&l| self.net.line_tph[l as usize] != week_tph[l as usize] && self.svc.lines.get(l as usize).is_some_and(|s| s.ok)).collect();
                 if !moved.is_empty() { self.svc.update_scoped(&self.net, &[], &moved, true, Some((&[], &[]))); }
             }
+            // T-3584: lines sharing track are paced on the weekends' headways too, from the weekdays'
+            // pacing at first
+            let (week_pace, week_pace_in) = (std::mem::take(&mut self.net.line_pace), std::mem::take(&mut self.pace_in));
+            if fresh {
+                self.net.line_pace = week_pace.clone();
+                self.pace_in = week_pace_in.clone();
+            } else {
+                self.net.line_pace = std::mem::take(&mut self.pace_rest);
+                self.pace_in = std::mem::take(&mut self.pace_in_rest);
+            }
             self.settle_edited = std::mem::take(&mut self.settle_edited_rest);
             self.settle_counts(full);
             self.settle_edited.clear();
+            for _ in 0..PACE_ROUNDS {
+                if !self.pace_merges(false) {
+                    break;
+                }
+                self.settle_counts(full);
+            }
+            self.pace_in.iter_mut().flatten().for_each(|p| p.fresh = false);
+            self.pace_rest = std::mem::replace(&mut self.net.line_pace, week_pace);
+            self.pace_in_rest = std::mem::replace(&mut self.pace_in, week_pace_in);
             self.net.line_tph_rest.clone_from(&self.net.line_tph);
             // a loop's counts set by hand were made even (as its weekday counts are), which it keeps
-            for &(l, _) in &own {
-                if let (Some(c), Some(t)) = (&mut self.net.line_weekend[l].counts, self.net.line_trains[l]) { *c = t; }
-            }
+            let even: Vec<(usize, [u32; 5])> = own.iter().filter(|&&(l, _)| self.net.line_weekend[l].counts.is_some()).filter_map(|&(l, _)| self.net.trains_of(l).map(|t| (l, t))).collect();
             self.net.settle_kept_rest = std::mem::replace(&mut self.net.settle_kept, week_kept);
-            self.net.line_trains = week_trains;
-            self.net.line_auto = week_auto;
+            self.put_back_weekdays(week);
+            for (l, t) in even {
+                let (m, x) = unplace(t);
+                self.net.line_weekend[l].counts = Some(m);
+                self.net.line_x[l].weekend_counts = x;
+            }
             self.net.line_tph = week_tph;
             self.net.rates_settled = settled;
             self.svc_rest = Some(Box::new(std::mem::replace(&mut self.svc, week_svc)));
             self.net.rest_solved = true;
         }
-        let on = |l: usize, t: &[[f32; 3]], s: bool| if s { t.get(l).copied() } else { self.net.line_tph.get(l).copied() };
+        let on = |l: usize, t: &[[f32; SLOTS]], s: bool| if s { t.get(l).copied() } else { self.net.line_tph.get(l).copied() };
         let moved: Vec<u32> = (0..n as u32).filter(|&l| on(l as usize, &before.0, before.1) != on(l as usize, &self.net.line_tph_rest, self.net.rest_solved)).collect();
         // their weekend departures are drawn again
         self.svc.note_changed(&moved);
@@ -757,6 +919,7 @@ impl TrackWorld {
             if self.svc.lines[id as usize].paired() {
                 if let Some(c) = self.net.line_trains[id as usize].as_mut() {
                     c.iter_mut().for_each(|x| *x += *x % 2);
+                    self.net.line_x[id as usize].trains.iter_mut().for_each(|x| *x += *x % 2);
                 }
             }
         }
@@ -764,17 +927,17 @@ impl TrackWorld {
         let mut affected = vec![];
         // T-1283: per line and level, the sign its shortfall last had, how often it has turned
         // without shrinking by half, and its size at the last turn
-        let mut swings: Vec<[(i8, u8, f64); LEVELS]> = vec![[(0, 0, 0.0); LEVELS]; ids.len()];
-        let mut kept_now = vec![[false; LEVELS]; ids.len()];
+        let mut swings: Vec<[(i8, u8, f64); SLOTS]> = vec![[(0, 0, 0.0); SLOTS]; ids.len()];
+        let mut kept_now = vec![[false; SLOTS]; ids.len()];
         // T-3233: a round is a function of the rates, round trips and swings it starts from, so a
         // state seen `p` rounds before comes round every `p` rounds to the cap; the settle then runs
         // only the rounds that end it in the cap's state, to the bit
-        let mut seen: std::collections::VecDeque<(Vec<[f32; 3]>, Vec<[f64; 3]>, Vec<[(i8, u8, f64); LEVELS]>)> = Default::default();
+        let mut seen: std::collections::VecDeque<(Vec<[f32; SLOTS]>, Vec<[f64; SLOTS]>, Vec<[(i8, u8, f64); SLOTS]>)> = Default::default();
         let mut stop_at: Option<usize> = None;
-        let mut last_rates: Option<Vec<[f32; 3]>> = None;
+        let mut last_rates: Option<Vec<[f32; SLOTS]>> = None;
         for round in 0..SETTLE_ROUNDS {
-            let trips: Vec<[f64; 3]> = ids.iter().map(|&id| self.svc.lines[id as usize].round_trip).collect();
-            let rates: Vec<[f32; 3]> = ids.iter().map(|&id| self.net.line_tph[id as usize]).collect();
+            let trips: Vec<[f64; SLOTS]> = ids.iter().map(|&id| self.svc.lines[id as usize].round_trip).collect();
+            let rates: Vec<[f32; SLOTS]> = ids.iter().map(|&id| self.net.line_tph[id as usize]).collect();
             match stop_at {
                 Some(s) if round >= s => break,
                 Some(_) => {}
@@ -788,15 +951,14 @@ impl TrackWorld {
                     }
                 }
             }
-            let mut active = [false; LEVELS];
-            let mut off = vec![[false; LEVELS]; ids.len()];
+            let mut active = [false; SLOTS];
+            let mut off = vec![[false; SLOTS]; ids.len()];
             let keep = &mut kept_now;
-            keep.iter_mut().for_each(|k| *k = [false; LEVELS]);
+            keep.iter_mut().for_each(|k| *k = [false; SLOTS]);
             let worst = self.svc.cap.bottlenecks(self.net.line_count());
             let scope = self.settle_scope.as_deref();
             for (j, &id) in ids.iter().enumerate() {
-                let counts = self.net.line_trains[id as usize].unwrap();
-                for lev in 0..LEVELS {
+                for lev in self.net.slots() {
                     let short = self.net.running_trains(id as usize, lev, trips[j][lev]) - rates[j][lev] as f64 * trips[j][lev] / 3600.0;
                     // T-517: a line short of its fleet's rate is settled when a track it uses is full.
                     // T-3526: not single track it alone runs over past full: only its own rate can
@@ -826,7 +988,7 @@ impl TrackWorld {
                         sw.2 = short.abs();
                     }
                     if sign != 0 { sw.0 = sign; }
-                    let left = (id, lev, rates[j][lev].to_bits(), trips[j][lev].to_bits(), counts[lev]);
+                    let left = (id, lev, rates[j][lev].to_bits(), trips[j][lev].to_bits(), self.net.trains_key(id as usize, lev));
                     keep[j][lev] = (sw.1 >= SWING_TURNS && short > 0.0) || self.net.settle_kept.contains(&left);
                     // T-1787: on an edit a settled line is left as it is, not probed and stepped
                     // with the rest of its level: on shared track each line moved re-times its
@@ -840,7 +1002,7 @@ impl TrackWorld {
             // A common 1% upward probe measures the sum of positive congestion derivatives.
             // Dividing by this bound damps shared-track feedback even close to saturation.
             for (j, &id) in ids.iter().enumerate() {
-                for lev in (0..LEVELS).filter(|&lev| active[lev] && (full || off[j][lev])) { self.net.line_tph[id as usize][lev] *= 1.01; }
+                for lev in (0..SLOTS).filter(|&lev| active[lev] && (full || off[j][lev])) { self.net.line_tph[id as usize][lev] *= 1.01; }
             }
             // T-1787: an edit probes from the capacity solve alone (`Service::probe_trips`), the
             // profiles worked out once a round; a full settle probes with them, as before
@@ -853,8 +1015,8 @@ impl TrackWorld {
             };
             for (j, &id) in ids.iter().enumerate() {
                 let i = id as usize;
-                let counts = self.net.line_trains[i].unwrap();
-                for lev in (0..LEVELS).filter(|&lev| active[lev]) {
+                for lev in (0..SLOTS).filter(|&lev| active[lev]) {
+                    let count = self.net.trains_in(i, lev);
                     if !off[j][lev] {
                         self.net.line_tph[i][lev] = rates[j][lev];
                         continue;
@@ -865,7 +1027,7 @@ impl TrackWorld {
                     let old = rates[j][lev] as f64;
                     let runs = self.net.running_trains(i, lev, trip);
                     let residual = old * trip - runs * 3600.0;
-                    self.net.line_tph[i][lev] = (if counts[lev] == 0 || trip <= 0.0 { 0.0 } else if runs < counts[lev] as f64 {
+                    self.net.line_tph[i][lev] = (if count == 0.0 || trip <= 0.0 { 0.0 } else if runs < count {
                         // T-2607: the headway set, whatever the round trip
                         runs * 3600.0 / trip
                     } else {
@@ -874,7 +1036,7 @@ impl TrackWorld {
                 }
             }
             // T-517: no track carries more trains than its capacity; a fleet's surplus waits at the ends
-            for lev in (0..LEVELS).filter(|&lev| active[lev]) {
+            for lev in (0..SLOTS).filter(|&lev| active[lev]) {
                 let want: Vec<(u32, f64)> = ids.iter().map(|&id| (id, self.net.line_tph[id as usize][lev] as f64)).collect();
                 for (&id, got) in ids.iter().zip(self.svc.cap.fill(&self.net, &want, lev)) {
                     self.net.line_tph[id as usize][lev] = got as f32;
@@ -888,11 +1050,11 @@ impl TrackWorld {
             if still { break; }
             last_rates = Some(rates);
         }
-        for &id in &ids { self.svc.lines[id as usize].trains = self.net.line_trains[id as usize].unwrap(); }
+        for &id in &ids { self.svc.lines[id as usize].trains = self.net.slot_trains(id as usize); }
         self.net.settle_kept.clear();
         for (j, &id) in ids.iter().enumerate() {
-            for lev in (0..LEVELS).filter(|&lev| kept_now[j][lev]) {
-                self.net.settle_kept.push((id, lev, self.net.line_tph[id as usize][lev].to_bits(), self.svc.lines[id as usize].round_trip[lev].to_bits(), self.net.line_trains[id as usize].unwrap()[lev]));
+            for lev in (0..SLOTS).filter(|&lev| kept_now[j][lev]) {
+                self.net.settle_kept.push((id, lev, self.net.line_tph[id as usize][lev].to_bits(), self.svc.lines[id as usize].round_trip[lev].to_bits(), self.net.trains_key(id as usize, lev)));
             }
         }
         affected.extend(ids.into_iter().filter(|&id| before[id as usize] != self.net.line_tph[id as usize]));
@@ -909,7 +1071,7 @@ impl TrackWorld {
     pub fn step_is_service(&self, redo: bool) -> bool {
         fn only_counts(op: &Op) -> bool {
             match op {
-                Op::TrainCounts { .. } | Op::AutoTrains { .. } | Op::Weekend { .. } => true,
+                Op::TrainCounts { .. } | Op::AutoTrains { .. } | Op::Weekend { .. } | Op::Rows { .. } | Op::Extra { .. } | Op::Hours { .. } => true,
                 Op::Batch(ops) => !ops.is_empty() && ops.iter().all(only_counts),
                 _ => false,
             }
@@ -1097,14 +1259,23 @@ impl TrackWorld {
     fn commit_with(&mut self, op: Op, checked: bool, service: bool) -> Result<(EditResult, Op), Vec<Issue>> {
         let (cost_before, built_before) = self.net.total_and_built_cost();
         let again = op.clone();
+        // T-3542: the game's hours move every line (see `reslot` below)
+        let game_hours = |o: &Op| matches!(o, Op::Hours { line: None, .. });
+        let hours_game = match &op { Op::Batch(v) => v.iter().any(game_hours), o => game_hours(o) };
         // T-3482: each line's rates before the edit, weekdays' and weekends', None for a line not there
-        let had: Vec<Option<[[f32; 3]; 2]>> = (0..self.net.line_count()).map(|l| self.net.line_ok(l as u32).then(|| [WEEKDAYS, WEEKEND].map(|row| std::array::from_fn(|lev| self.net.line_tph_on(l, row, lev))))).collect();
-        let none_at = |lines: &[u32], row: usize| -> Vec<(u32, [bool; LEVELS])> {
-            lines.iter().map(|&l| (l, had.get(l as usize).copied().flatten().map_or([true; LEVELS], |r| r[row].map(|x| x == 0.0)))).filter(|e| e.1.contains(&true)).collect()
+        let had: Vec<Option<[[f32; SLOTS]; 2]>> = (0..self.net.line_count()).map(|l| self.net.line_ok(l as u32).then(|| [WEEKDAYS, WEEKEND].map(|row| std::array::from_fn(|lev| self.net.line_tph_on(l, row, lev))))).collect();
+        let worked: [bool; SLOTS] = std::array::from_fn(|s| self.net.slot_worked(s));
+        let none_at = |lines: &[u32], row: usize| -> Vec<(u32, [bool; SLOTS])> {
+            lines.iter().map(|&l| (l, had.get(l as usize).copied().flatten().map_or(worked, |r| std::array::from_fn(|s| worked[s] && r[row][s] == 0.0)))).filter(|e| e.1.contains(&true)).collect()
         };
-        let switch = match &op {
-            Op::AutoTrains { id, auto, .. } if self.net.line_auto.get(*id as usize).is_some_and(|a| a.is_some() != auto.is_some()) => {
-                Some((*id, self.net.line_trains[*id as usize].unwrap_or_default().map(|n| n == 0)))
+        // (T-3542: also inside a batch, as a line of four or five rows sets its midday and afternoon with it)
+        let auto_op = match &op {
+            Op::Batch(ops) => ops.iter().find(|o| matches!(o, Op::AutoTrains { .. })),
+            o => Some(o),
+        };
+        let switch = match auto_op {
+            Some(Op::AutoTrains { id, auto, .. }) if self.net.line_auto.get(*id as usize).is_some_and(|a| a.is_some() != auto.is_some()) => {
+                Some((*id, self.net.trains_of(*id as usize).unwrap_or_default().map(|n| n == 0)))
             }
             _ => None,
         };
@@ -1123,6 +1294,28 @@ impl TrackWorld {
                 return Err(added);
             }
             (inv, t, der) = self.apply_rerouted(again, checked)?;
+        }
+        // T-3542: rows that split or join the slots work every line out again, as a load does
+        let old_slots = self.net.period_slot();
+        let reslotted = service && self.net.refresh_slots();
+        // T-3542: a line whose hours fall into the slots otherwise (its hours, its rows) settles
+        // afresh: what kept it no longer says where its rates go
+        let moved = if service { std::mem::take(&mut self.net.mix_moved) } else { vec![] };
+        if !moved.is_empty() {
+            self.net.settle_kept.retain(|k| !moved.contains(&k.0));
+            self.net.settle_kept_rest.retain(|k| !moved.contains(&k.0));
+        }
+        // the game's hours move every line: worked out again as a periods switch is (London 0.9 s
+        // natively against 1.8-6.8 s as an edit of every line's schedule)
+        let hours_all = hours_game && !moved.is_empty();
+        if reslotted || hours_all {
+            self.reslot(old_slots);
+            let (cost_after, built_after) = self.net.total_and_built_cost();
+            let all: Vec<u32> = (0..self.net.line_count() as u32).filter(|&l| self.net.line_ok(l)).collect();
+            let service = super::service::ServiceDirty { rebuilt: all.clone(), recomputed: all.clone(), shared: vec![], demand: all.clone() };
+            let dirty = Dirty { edges: der.edges, nodes: der.nodes, crossings: der.crossings, resources: (0..self.svc.cap.res.len() as u32).collect(), lines: all, service };
+            let charge = if built_after - built_before > 1e-9 { built_after - built_before } else { 0.0 };
+            return Ok((EditResult { dirty, cost_before, cost_after, built_before, built_after, charge }, inv));
         }
         if !service {
             let (cost_after, built_after) = self.net.total_and_built_cost();
@@ -1186,6 +1379,7 @@ impl TrackWorld {
         // T-1925: the lines the edit changed take departure slots among the others
         self.place_departures(&direct);
         self.pin_twin_phases();
+        self.retime();
         let mut resources = vec![];
         for (r, res) in self.svc.cap.res.iter().enumerate() {
             let on_track = (res.edge != u32::MAX && der.edges.binary_search(&res.edge).is_ok())
@@ -1238,8 +1432,8 @@ impl TrackWorld {
         (0..self.net.line_count())
             .map(|l| {
                 let ls = self.svc.lines.get(l);
-                let times = std::array::from_fn(|r| (0..LEVELS).map(|lev| ls.map_or(vec![], |s| s.stop_to_stop_safe(r, lev))).collect());
-                (self.net.line_trains[l], self.net.line_tph[l], times)
+                let times = std::array::from_fn(|r| (0..SLOTS).map(|lev| ls.map_or(vec![], |s| s.stop_to_stop_safe(r, lev))).collect());
+                (self.net.trains_of(l), self.net.line_tph[l], times)
             })
             .collect()
     }
@@ -1249,11 +1443,11 @@ impl TrackWorld {
     fn demand_moved(&self, l: u32, before: &[DemandView]) -> bool {
         let Some((trains, tph, times)) = before.get(l as usize) else { return true };
         let i = l as usize;
-        if self.net.line_trains[i] != *trains || self.net.line_tph[i].iter().zip(tph).any(|(a, b)| (a - b).abs() >= DEMAND_TPH_EPS) {
+        if self.net.trains_of(i) != *trains || self.net.line_tph[i].iter().zip(tph).any(|(a, b)| (a - b).abs() >= DEMAND_TPH_EPS) {
             return true;
         }
         let Some(ls) = self.svc.lines.get(i) else { return true };
-        (0..2).any(|r| (0..LEVELS).any(|lev| {
+        (0..2).any(|r| self.net.slots().any(|lev| {
             let (now, was) = (ls.stop_to_stop_safe(r, lev), &times[r][lev]);
             now.len() != was.len() || now.iter().zip(was).any(|(a, b)| (a - b).abs() >= DEMAND_TIME_EPS_S)
         }))
@@ -1374,7 +1568,7 @@ impl TrackWorld {
         if !self.net.line_twin.iter().any(|t| matches!(t, Twin::Of(_))) {
             return;
         }
-        self.net.line_phase.resize(self.net.line_phase.len().max(n), [0.0; LEVELS]);
+        self.net.line_phase.resize(self.net.line_phase.len().max(n), [0.0; SLOTS]);
         for t in 0..n {
             let Twin::Of(p) = self.net.line_twin_of(t as u32) else { continue };
             if !self.net.line_ok(t as u32) || !self.net.line_ok(p) {
@@ -1420,7 +1614,8 @@ impl TrackWorld {
             }
             let stops = net.line_stops(l);
             let once = net.line_runs_once(l);
-            let path = net.route_hops(stops).ok().filter(|p| once || net.back_path_of(stops, p).is_some());
+            let ones = net.line_ones(l);
+            let path = net.route_hops(stops, ones).ok().filter(|p| once || net.back_path_of(stops, p, ones).is_some());
             match (path, net.line_data(l)) {
                 (Some(path), Some(mut d)) => {
                     d.path = path;
@@ -1482,7 +1677,8 @@ impl TrackWorld {
             let stops = net.line_stops(l);
             let once = net.line_runs_once(l);
             let turns = net.path_reversals(net.line_path(l)).len();
-            let Some(path) = net.route_hops(stops).ok().filter(|p| (once || net.back_path_of(stops, p).is_some()) && (!turned.contains(&l) || net.path_reversals(p).len() <= turns)) else { continue };
+            let ones = net.line_ones(l);
+            let Some(path) = net.route_hops(stops, ones).ok().filter(|p| (once || net.back_path_of(stops, p, ones).is_some()) && (!turned.contains(&l) || net.path_reversals(p).len() <= turns)) else { continue };
             if let Some(mut d) = net.line_data(l).filter(|d| d.path != path) {
                 d.path = path;
                 ops.push(Op::Line { id: l, data: Some(d) });
@@ -1542,6 +1738,9 @@ impl TrackWorld {
                 Op::AutoTrains { id, auto: old_auto, trains: old_trains }
             },
             Op::Weekend { id, weekend } => Op::Weekend { id, weekend: n.set_weekend(id, weekend)? },
+            Op::Rows { line, rows } => Op::Rows { line, rows: n.set_rows(line, rows)? },
+            Op::Extra { id, x } => Op::Extra { id, x: n.set_extra(id, x)? },
+            Op::Hours { line, cuts } => Op::Hours { line, cuts: n.set_hours(line, cuts)? },
             Op::Split { edge, s, node, new_edge } => {
                 if n.node_ok(node) {
                     return Err(Issue::NoSuchNode { node });
@@ -1585,7 +1784,7 @@ impl TrackWorld {
                 let mut inv = vec![Op::Edge { id, data: n.set_edge(id, None)? }];
                 for (l, turns) in users.into_iter().zip(turns) {
                     let mut d = self.net.line_data(l).unwrap();
-                    if let Some(path) = self.net.route(&d.stops).filter(|p| self.net.turn_count(&d.stops, p) <= turns) {
+                    if let Some(path) = self.net.route(&d.stops, &d.ones).filter(|p| self.net.turn_count(&d.stops, p) <= turns) {
                         d.path = path;
                         let old = self.net.set_line(l, Some(d))?;
                         inv.push(Op::Line { id: l, data: old });

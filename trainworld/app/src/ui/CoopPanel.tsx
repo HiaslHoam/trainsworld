@@ -6,7 +6,7 @@ import { useEffect, useState } from "preact/hooks";
 import { coopGuests, coopRole, coopStatus, hostGame, joinGame, leaveCoop, resync } from "../game/coop";
 import { hostOnline, joinOnline, lobbyGames, lobbyLogin, lobbyProbe, lobbyReady, lobbyRefresh, lobbyUser } from "../game/lobby";
 import { relayLink } from "../game/relayTransport";
-import { gamesLoaded } from "../workers/clockClient";
+import { gameStamp } from "../workers/clockClient";
 import { t } from "../i18n";
 
 /** The online part of the menu: sign in, host the game in hand, the open games. */
@@ -35,7 +35,7 @@ function Online({ close }: { close: () => void }) {
       <span class="muted small">{t("coop.signedIn", { name: user })}</span>
       <div class="coop-host-row">
         <input type="text" value={title} maxLength={60} placeholder={t("coop.gameTitle")} onInput={(e) => setTitle((e.target as HTMLInputElement).value)} />
-        <button class="btn" disabled={gamesLoaded.value === 0} onClick={() => { close(); void hostOnline(title || user); }}>{t("coop.hostOnline")}</button>
+        <button class="btn" disabled={gameStamp.value === 0} onClick={() => { close(); void hostOnline(title || user); }}>{t("coop.hostOnline")}</button>
       </div>
       {games.length === 0 && <span class="muted small">{t("coop.noGames")}</span>}
       {games.map((g) => (
@@ -57,7 +57,7 @@ export function CoopPanel() {
       <div class="coop-panel">
         {open && (
           <div class="coop-menu">
-            <button class="btn" disabled={gamesLoaded.value === 0} onClick={() => { setOpen(false); hostGame(); }}>{t("coop.host")}</button>
+            <button class="btn" disabled={gameStamp.value === 0} onClick={() => { setOpen(false); hostGame(); }}>{t("coop.host")}</button>
             <button class="btn" onClick={() => { setOpen(false); joinGame(); }}>{t("coop.join")}</button>
             <p class="muted small">{t("coop.hint")}</p>
             {lobbyReady.value && <Online close={() => setOpen(false)} />}

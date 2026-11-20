@@ -450,17 +450,151 @@ pub const DEMAND_TIME_EPS_S: f64 = 5.0;
 /// A rate an edit's settle moves on another line by this much or more (trains an hour) wakes demand
 /// for that line (T-1805: a train every 100 hours changes no wait anyone could see).
 pub const DEMAND_TPH_EPS: f32 = 0.01;
-/// Demand levels: index into a line's `tph`.
-pub const HIGH: usize = 0;
-pub const MEDIUM: usize = 1;
-pub const LOW: usize = 2;
-pub const LEVELS: usize = 3;
+/// The rows a line sets its trains in (high, medium and low demand): what the player sets, a save
+/// keeps and the app reads (`LineData::trains`, `auto`, `tph`, `Weekend`), as a row index.
+pub const ROWS: usize = 3;
+/// T-3542: service slots, one per demand period (`PERIOD_HOURS`, slot = period): what the track
+/// side keeps per period (rates, capacity, holds, profiles, round trips, pacing, departures). Slots
+/// that every line runs alike share one (`Network::period_slot`): only those are worked out and
+/// read, so a game of 3-row lines costs what three levels did. The app's copy is
+/// app/src/map/profiles.ts `SLOTS` (a trip's profile is `(line * 2 + run) * SLOTS + slot`).
+pub const SLOTS: usize = 5;
 /// The five periods of SPEC 4.2 in the demand kernel's order (morning peak, midday, evening
-/// peak, evening, night): start and end hour, and which demand level schedules them. High runs
-/// 6-20, medium 20-24, low 0-6 (Anita, 2026-10-27, T-1536). A level is a set of whole periods:
-/// demand solves each period on its own level's trains.
+/// peak, evening, night): start and end hour, and which row schedules them. High runs 6-20,
+/// medium 20-24, low 0-6 (Anita, 2026-10-27, T-1536). A row is a set of whole periods: demand
+/// solves each period on its own row's trains.
 pub const PERIOD_HOURS: [(f64, f64); 5] = [(6.0, 10.0), (10.0, 16.0), (16.0, 20.0), (20.0, 24.0), (0.0, 6.0)];
-pub const PERIOD_LEVEL: [usize; 5] = [HIGH, HIGH, HIGH, MEDIUM, LOW];
+pub const PERIOD_ROW: [usize; 5] = [0, 0, 0, 1, 2];
+/// The slot that serves each period when every line sets three rows: its row's first period's.
+pub const PERIOD_SLOT_3: [usize; 5] = if SLOTS == 5 { [0, 0, 0, 3, 4] } else { [0, 0, 0, 1, 2] };
+/// The slot each row is kept in (its first period's), for a line of three rows.
+pub const ROW_SLOT: [usize; ROWS] = [PERIOD_SLOT_3[0], PERIOD_SLOT_3[3], PERIOD_SLOT_3[4]];
+/// The slots of the three rows: high, medium and low demand, as indices into a per-slot array.
+pub const HIGH: usize = ROW_SLOT[0];
+pub const MEDIUM: usize = ROW_SLOT[1];
+pub const LOW: usize = ROW_SLOT[2];
+/// The row that sets each slot's trains on a line of three rows.
+pub const SLOT_ROW: [usize; SLOTS] = {
+    let mut a = [0; SLOTS];
+    let mut s = 0;
+    while s < SLOTS {
+        a[s] = if SLOTS == 5 { PERIOD_ROW[s] } else { s };
+        s += 1;
+    }
+    a
+};
+/// A row array of a line of three rows in its slots (`PERIOD_SLOT_3`), `none` in the slots no
+/// period uses (`Network::rows_in`).
+pub fn rows_to_slots<T: Copy>(r: [T; ROWS], none: T) -> [T; SLOTS] {
+    std::array::from_fn(|s| if PERIOD_SLOT_3.contains(&s) { r[SLOT_ROW[s]] } else { none })
+}
+/// A slot array read back per row (each row from its slot, `ROW_SLOT`).
+pub fn slots_to_rows<T: Copy>(s: [T; SLOTS]) -> [T; ROWS] {
+    ROW_SLOT.map(|k| s[k])
+}
+const _: () = assert!(SLOTS == 5, "4 and 5 rows (T-3542) need a slot per period");
+/// T-3542: a line sets its trains in 3, 4 or 5 rows (`Network::rows`). A row's value is kept in one
+/// of five places: 0-2 the three rows' arrays (`LineData::tph`, `trains`, `auto`, `Weekend`: high,
+/// medium and low demand on a line of three rows; rush or morning, evening, night on one of four
+/// or five), 3 and 4 the midday and afternoon rows (`Extra`).
+pub const ROWS_MIN: usize = 3;
+pub const ROWS_MAX: usize = 5;
+/// The place each period reads, for a line of `n` rows (index `n - ROWS_MIN`): four rows split
+/// midday out of high demand (rush is the morning and afternoon peaks), five the afternoon too.
+pub const PERIOD_PLACE: [[usize; 5]; 3] = [[0, 0, 0, 1, 2], [0, 3, 0, 1, 2], [0, 3, 4, 1, 2]];
+/// The slot serving each period when the finest line sets `n` rows: each period joins its row's
+/// earliest. The choices nest (each splits a row of the one before), so this is the game's
+/// `Network::period_slot` and every line's rows are whole slots.
+pub const PERIOD_SLOT_N: [[usize; 5]; 3] = [[0, 0, 0, 3, 4], [0, 1, 0, 3, 4], [0, 1, 2, 3, 4]];
+/// A line's rows in the day's order, as places.
+pub const ROW_PLACES: [&[usize]; 3] = [&[0, 1, 2], &[0, 3, 1, 2], &[0, 3, 4, 1, 2]];
+/// T-3542: the hours a line's day splits at (the cuts), local whole hours: where its morning (rush,
+/// high), midday, afternoon, evening and night stretches start, in that order (`PERIOD_HOURS`'s).
+/// Stretch `i` runs from `cuts[i]` to `cuts[i + 1]` (the night to the next morning's, 24 h on). Each
+/// stretch is at least `STRETCH_MIN_H`, the first starts in 0-23 and the night reaches past
+/// midnight only as far as the morning leaves it (`cuts_ok`). Stretch `i`'s row is
+/// `PERIOD_PLACE[n][i]`, so a line of three rows only shows cuts 0, 3 and 4 (high, medium, low);
+/// the other two stay inside high, at least two hours apart.
+pub type Cuts = [u8; 5];
+pub const CUTS_DEFAULT: Cuts = [6, 10, 16, 20, 24];
+/// The shortest stretch a line's hours may have (Anita, 2026-11-17: shortest row 2 hours).
+pub const STRETCH_MIN_H: u8 = 2;
+/// Whether `c` is a line's hours: whole hours in order, every stretch at least `STRETCH_MIN_H`.
+pub fn cuts_ok(c: Cuts) -> bool {
+    c[0] < 24 && (0..5).all(|i| {
+        let next = if i == 4 { c[0] as u32 + 24 } else { c[i + 1] as u32 };
+        next >= c[i] as u32 + STRETCH_MIN_H as u32
+    })
+}
+/// Stretch `i`'s hours (start, end) by `c`, the end past the start (night's past 24).
+pub fn stretch_hours(c: Cuts, i: usize) -> (u32, u32) {
+    (c[i] as u32, if i == 4 { c[0] as u32 + 24 } else { c[i + 1] as u32 })
+}
+/// One piece of a line's local day: hours `a..b` (0-24) inside one demand period `q` and one
+/// stretch of the line's own hours, run by place `k` (`params::places`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub struct DayPiece {
+    pub a: u8,
+    pub b: u8,
+    pub q: u8,
+    pub k: u8,
+}
+/// The most pieces a day splits into (five periods cut at five more hours, plus midnight).
+pub const PIECES_MAX: usize = 12;
+/// A line's local day in pieces (`DayPiece`), from midnight, by its hours `c` and rows `n` (3-5): cut
+/// at every period bound and every cut, joined where the period and the place stay the same. At
+/// the default hours the five periods (night, morning, midday, afternoon, evening).
+pub fn day_pieces(c: Cuts, n: usize) -> ([DayPiece; PIECES_MAX], usize) {
+    let mut at: Vec<u8> = vec![0, 24];
+    at.extend(PERIOD_HOURS.iter().map(|p| p.0 as u8));
+    at.extend(c.iter().map(|&h| h % 24));
+    at.sort_unstable();
+    at.dedup();
+    let period = |h: u8| PERIOD_HOURS.iter().position(|&(a, b)| (h as f64) >= a && (h as f64) < b).unwrap_or(0);
+    // the stretch in force at local hour h
+    let stretch = |h: u8| (0..5).find(|&i| { let (a, b) = stretch_hours(c, i); let h = h as u32; (a..b).contains(&h) || (a..b).contains(&(h + 24)) }).unwrap_or(0);
+    let mut out = [DayPiece::default(); PIECES_MAX];
+    let mut m = 0;
+    for w in at.windows(2) {
+        let (q, k) = (period(w[0]) as u8, PERIOD_PLACE[n - ROWS_MIN][stretch(w[0])] as u8);
+        if m > 0 && out[m - 1].q == q && out[m - 1].k == k {
+            out[m - 1].b = w[1];
+        } else {
+            out[m] = DayPiece { a: w[0], b: w[1], q, k };
+            m += 1;
+        }
+    }
+    (out, m)
+}
+/// Half the shortest row of a line's hours `c` with `n` rows, seconds: the most its departures may
+/// lead a stretch's start (`service::LEAD_MAX_S` at the default hours, four-hour rows). A row is the
+/// stretches next to each other with one place (high's three on a line of three rows).
+pub fn shortest_row_h(c: Cuts, n: usize) -> u32 {
+    let p = PERIOD_PLACE[n - ROWS_MIN];
+    let mut best = 24;
+    for i in 0..5 {
+        // a row's first stretch: its place differs from the stretch before's
+        if p[i] == p[(i + 4) % 5] { continue; }
+        let mut h = 0;
+        let mut j = i;
+        loop {
+            let (a, b) = stretch_hours(c, j);
+            h += b - a;
+            j = (j + 1) % 5;
+            if j == i || p[j] != p[i] { break; }
+        }
+        best = best.min(h);
+    }
+    best
+}
+/// Three rows' values and the midday and afternoon ones as the five places.
+pub fn places<T: Copy>(m: [T; ROWS], x: [T; 2]) -> [T; 5] {
+    [m[0], m[1], m[2], x[0], x[1]]
+}
+/// The places back as three rows' values and the midday and afternoon ones.
+pub fn unplace<T: Copy>(p: [T; 5]) -> ([T; ROWS], [T; 2]) {
+    ([p[0], p[1], p[2]], [p[3], p[4]])
+}
 /// The kinds of day a line sets its trains for (`LineData::weekend`): weekdays (a superholiday's
 /// days too) and weekends (Saturday and Sunday or the country's own weekend, and public holidays).
 pub const WEEKDAYS: usize = 0;

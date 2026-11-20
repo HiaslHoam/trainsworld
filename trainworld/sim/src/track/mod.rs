@@ -59,6 +59,7 @@ pub mod roads;
 pub mod save;
 pub mod service;
 pub mod spacing;
+pub mod timing;
 pub mod span;
 pub mod streets;
 pub mod trace;
@@ -73,6 +74,10 @@ pub mod world;
 mod frame_tests;
 #[cfg(test)]
 mod merc_tests;
+#[cfg(test)]
+mod slot_tests;
+#[cfg(test)]
+mod hours_tests;
 #[cfg(test)]
 mod tests;
 #[cfg(test)]

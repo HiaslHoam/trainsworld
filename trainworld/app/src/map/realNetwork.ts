@@ -181,7 +181,7 @@ export function startRealNetwork(map: maplibregl.Map) {
       .sort((x, y) => dist(x) - dist(y))
       .slice(0, PER_PASS);
     if (!hits.length) return void ensureExtra();
-    // under the real stations' rings (T-3570) and the reach
+    // under the real stations' dots (T-3570) and the reach
     const before = map.getLayer(REAL_STATIONS_LAYER) ? REAL_STATIONS_LAYER : map.getLayer(REACH) ? REACH : firstSymbolId(map);
     const colours = colour(SHADES[mapShade.peek()]);
     for (const { cc } of hits) {
@@ -258,7 +258,7 @@ export function startRealNetwork(map: maplibregl.Map) {
     // added for tram track (T-3069)
     filter = shown === "all" ? (mode ? routable(mode) : EVERYTHING) : mode === "tram" ? PASSENGER_TRAM : PASSENGER;
     on = shown !== "none" || snap;
-    extraOn = shown === "all" && !snap;
+    extraOn = shown === "all";
     opacity = snap ? (reach ? OPACITY_DIM : OPACITY_SNAP) : SHADES[mapShade.value].realOpacity;
     apply();
   });

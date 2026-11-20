@@ -2,6 +2,8 @@
 
 Where things live and how they are built. Read when you need to find a file; the rules are in
 `CLAUDE.md`. Keep a line here current when you add, move or split a module.
+For the big picture first (the parts, how data moves, three everyday moments), read `docs/code-tour.md`;
+whoever moves a file it names fixes it there too.
 
 ## sim/: the Rust crate (`trainworld-sim`)
 
@@ -35,7 +37,7 @@ tests natively.
 - `src/track/trace.rs`: a real railway's line as corners within a tolerance (T-727c), for
   `TrackApi::trace_route` and the real-network snap; `Tracer` runs it in steps (`RouteTrace` in
   WASM, T-754); notes/T-727.md.
-- The rest of `src/track/`: `net.rs` (the network: nodes, edges, stations and lines as flat arrays by stable id, with everything derived from them), `lanes.rs` (the tracks inside a piece, `Network::lanes`, and each node's move table, `Moves`, which routing, line checks, the flat-junction badge, junction capacity and the train guard read; the way single track runs, `edge_way`, from its run's joins to double track, `derive_ways`, `join_away`, T-3137; what turns around when the running side does, `flip_reversals`, T-3297, with `TrackWorld::flip_right_hand` in `world.rs` and `wasm/flip.rs`), `geom.rs` (alignment geometry: points of intersection with an arc fitted at each, straights between, ramps), `cross.rs` (where track crosses track, on a 1 km grid of edges), `bridge.rs` (a ground-level segment over water becomes a bridge, T-656), `roads.rs` (the road lines ground-level track crosses, fed tile by tile, T-1929), `capacity.rs` (resources, utilisation per demand level, Kingman's delay, holds), `profile.rs` (run-time profiles along a line's path under speed limits), `spacing.rs` (the phase of each line's departures, T-1925), `save.rs` (the network part of a save), `names.rs` (tidies station and line names from a real network, T-1442), `params.rs` (every tuning constant of the track model), `bench.rs` (the synthetic network `bin/track_bench.rs` times). Test modules sit beside their file (`frame_tests.rs`, `merc_tests.rs`, `related_tests.rs`, `transition_tests.rs`, `wasm/*_tests.rs`).
+- The rest of `src/track/`: `net.rs` (the network: nodes, edges, stations and lines as flat arrays by stable id, with everything derived from them), `lanes.rs` (the tracks inside a piece, `Network::lanes`, and each node's move table, `Moves`, which routing, line checks, the flat-junction badge, junction capacity and the train guard read; the way single track runs, `edge_way`, from its run's joins to double track, `derive_ways`, `join_away`, T-3137; what turns around when the running side does, `flip_reversals`, T-3297, with `TrackWorld::flip_right_hand` in `world.rs` and `wasm/flip.rs`), `geom.rs` (alignment geometry: points of intersection with an arc fitted at each, straights between, ramps), `cross.rs` (where track crosses track, on a 1 km grid of edges), `bridge.rs` (a ground-level segment over water becomes a bridge, T-656), `roads.rs` (the road lines ground-level track crosses, fed tile by tile, T-1929), `capacity.rs` (resources, utilisation per demand level, Kingman's delay, holds), `profile.rs` (run-time profiles along a line's path under speed limits), `spacing.rs` (the phase of each line's departures, T-1925), `timing.rs` (each train's own timetable: a local's waits at passing stations and an express timed behind its local, worked out train by train after every settle, `retime`, T-3346 stage 2), `save.rs` (the network part of a save), `names.rs` (tidies station and line names from a real network, T-1442), `params.rs` (every tuning constant of the track model), `bench.rs` (the synthetic network `bin/track_bench.rs` times). Test modules sit beside their file (`frame_tests.rs`, `merc_tests.rs`, `related_tests.rs`, `transition_tests.rs`, `wasm/*_tests.rs`).
 - `src/diagram.rs`: the network diagram's carry solve (`CarrySolver`: conjugate gradients with the black box multigrid,
   both axes as one f64x2), bit for bit `app/src/diagram/sheetLines.ts`' JavaScript one; behind feature `diagram` (on by
   default, so in the track module); the diagram worker loads it (T-2589, notes/T-2589.md).
@@ -119,7 +121,8 @@ for the demand workers (two modules from the one crate, notes/T-051.md).
   crossing a line, T-1168) and `relatedLayout.ts` (their diagram's rows, columns, turns, pills and
   the pills' hovers, drawn by `ui/inspector/RelatedStops.tsx`), `complexView.ts` (a click selecting the complex, a station opened alone, the
   zoomed-out dot groups; T-217, T-249), `complexLead.ts` (the member a complex goes by: a typed name, then
-  most lines; check `checks/t2683-keep-names.mjs`, T-2683), `links.ts` (the player's links, T-197), `lineActions.ts`
+  most lines; the complex's name, `nameSource`, `complexTitle`; check `checks/t2683-keep-names.mjs`, T-2683), `stationBinding.ts` (the
+  setting for new stations' names, T-3759), `links.ts` (the player's links, T-197), `lineActions.ts`
   (new and copied lines, Edit stops, construct blueprints: the N, L and C keys, T-670), `colourPick.ts`
   (the automatic line colour pick as pure functions: palette pick, CIEDE2000, the lines beside a line, T-2291;
   `lineColour.ts` re-picks a new line's colour after its stop edits; `checks/t2291-line-colour.mjs` in Node and
@@ -237,7 +240,7 @@ city's name in Japanese or Chinese from `place-names.json`, written by `tools/pl
   second click's route, T-727d; only where a graph covers the click, `covers`, T-913), `streetSnap.ts` (tram track's snap to streets, T-2927: `BusRoads.tramLeg` and `RoadGraph.turnPath`, then `trace_kind` in the router worker), `pick.ts`, `cellIndex.ts` and `snapIndex.ts` (grids built in idle time, at once for 20,000 items or more (T-2404), that narrow a pick
   and the build tools' snap to what is near the pointer, T-724, and carried over an edit, T-1030), `tools.ts` (drawing track, placing stations, the line tool; on touch the tap, preview and confirm and the control bar's place, T-1260), `touch.ts` (whether the last press was a finger, and what the touch control bar offers), `stationSnap.ts` (which overlapping track a station goes on, the nearest spot with room for the platform, T-671, T-1870), `edgeEdit.ts`
   (dragging blueprint track's PIs, T-064, T-092; a double click adding a point, T-2951), `nodeDrag.ts` (dragging blueprint nodes, T-093; a platform's end, T-1869; `endDrag`, a drag's cleanup), `dragHandles.ts` (where the platform-end handles are, for the markers and the drag, T-1869; `NODE_HIT_PX`, a node's reach for a press), `endMarkers.ts` (loose-end and draggable-point markers, T-416), `screenPlace.ts` (`placeAt`: every DOM mark placed through the overlay's projection, hidden where its point has no place on the screen, T-1777; `marksLayer`, a tool's layer of marks), `curveCircle.ts` (the circle of the segment being drawn, T-418),
-  `blueprintBox.ts` (the Select tool's drag box, T-333, and dragging its pick, T-475; its state is `game/blueprintPick.ts`; the pieces a rebuild would refuse outlined in red, T-3059, and the track beyond the pick its stations ramp on, T-3241, from `game/rebuild.ts`; the same for the track panel's quote and its set of Shift+clicked pieces, `game/trackSet.ts`, T-3634),
+  `blueprintBox.ts` (the Select tool's drag box, T-333, and dragging its pick, T-475; its state is `game/blueprintPick.ts`; the pieces a rebuild would refuse outlined in red, T-3059, and the track beyond the pick its stations ramp on, T-3241, from `game/rebuild.ts`; plain selecting's Shift+click on the same pick, `shiftClick`, T-3746),
   `busStops.ts` (a by-hand bus line's stop editing, T-2891; it snaps to stations and, by `game/busLinks.ts`, to other bus lines' stops within demand's merge, T-2992), `stopMarkers.ts` (the toggle markers of stop editing, T-233; the gap to a station they cannot
   reach, drawn by `gapFlash.ts`, T-1896), `reversalMarks.ts` (the icon over
   stations where a line reverses partway, T-797).
@@ -298,7 +301,7 @@ the station tag is `complexTip` in `map/networkTips.ts`).
 the person icon, and `startAccountUi`, which mounts both account panels in a root of their
 own so the start menu opens them too; styles in `account.css`, T-972); `Leaderboard.tsx` (the
 leaderboards and their trophy, placed beside the achievements by `Achievements.tsx`, T-973, T-2179; its board picker is a city search using `findStart` from `NewGame.tsx`, T-2813); `HelpPanel.tsx` (the "?" button's list of controls no button shows, T-908); `BuildTab.tsx` (the tools and the blueprint); `ToolBar.tsx` (the track and station bars on the map while their tool is on, T-2282, and `MapToolBar`, which draws the click mode's aura, with `clickMode`, T-2284); `LinesTab.tsx` (with its line groups' rows and row dragging, T-1791, T-1813; the groups from `game/lineGroups.ts`, the hand order from `game/handOrder.ts`; its eye toggles and Show all, T-3420), `StationsTab.tsx`, `GroupPill.tsx` (a group's outlined bullet, T-1813), `MoneyTab.tsx` (the tabs; the Cities tab is `Cities.tsx` mounted in `Dock.tsx`); `listParts.tsx` (the scope toggle, the Near column and the name order the Lines and Stations tabs share); `toolKeys.ts` (the build tools, the number and letter keys and `pickTool`); `hideUi.ts` (F2 hides the interface for screenshots, T-1491); `Modal.tsx` (the native modal dialog behind the saves, account and leaderboard panels and the confirmation question, with `useModalDialog`); `useClockQuery.ts` (`useClockQuery`, a panel's question to the clock worker, and `useLatestAnswer`); `scroller.ts` (`scrollerOf`, the nearest scrolling ancestor);
-`MoneyHistory.tsx` (the Money tab's history charts, T-447); `FareGraph.tsx` (the fare curve graph, linear and zoomable at one fixed ratio of its scales, its three nodes each dragged one way at a time with hover arrows, an arrow for one past the plot, and rows of steppers under it, the base fare then each stretch's end and rate per km, T-864, T-883, T-1112, T-1143, T-1201); `Cities.tsx` (the Cities list, T-550, T-749); `SettingsTab.tsx` (`SettingsSearch.tsx`, the search box over it that hides the rows it does not find, T-3681); `SavesPanel.tsx` (saved games, T-251; `thumbShade.ts` recolours a picture to the current theme, T-1852; `SlotThumb`, a save's picture with each panel's city named over it, T-894); `bullet.ts` (`bulletText`, `bulletNode`: a line bullet as one SVG, its outline in the line's shape (`bulletDraw`, T-3319) and its symbol placed from the canvas-measured ink box with the baseline on a whole device pixel, per font, symbol, size and scale, T-705, T-745; the sizes in it match `.chip` in style.css; used by `Chip` and `lineBullet`); `widgets.tsx` (chips, steppers,
+`MoneyHistory.tsx` (the Money tab's history charts, T-447); `FareGraph.tsx` (the fare curve graph, linear and zoomable at one fixed ratio of its scales, its nodes (three, or 1-12 from the Advanced fares panel, T-3739) each dragged one way at a time with hover arrows, an arrow for one past the plot, and rows of steppers under it, the base fare then each stretch's end and rate per km, T-864, T-883, T-1112, T-1143, T-1201); `AdvancedFares.tsx` (the Advanced fares panel: the bigger graph with Add point, rows with remove, the kind and transfer rows, every country's multiple and base fare, T-3739); `Cities.tsx` (the Cities list, T-550, T-749); `SettingsTab.tsx` (`SettingsSearch.tsx`, the search box over it that hides the rows it does not find, T-3681); `SavesPanel.tsx` (saved games, T-251; `thumbShade.ts` recolours a picture to the current theme, T-1852; `SlotThumb`, a save's picture with each panel's city named over it, T-894); `bullet.ts` (`bulletText`, `bulletNode`: a line bullet as one SVG, its outline in the line's shape (`bulletDraw`, T-3319) and its symbol placed from the canvas-measured ink box with the baseline on a whole device pixel, per font, symbol, size and scale, T-705, T-745; the sizes in it match `.chip` in style.css; used by `Chip` and `lineBullet`); `widgets.tsx` (chips, steppers,
 checkboxes and the inline SVG icons); `ColourPicker.tsx` (the line colour picker: preview while dragging, one commit on release, T-672); `TopBar.tsx`; `GoalTicks.tsx` (a region's goals as ticks over its split bar, the city view's, T-1437); `SkyBanner.tsx` (the day and night picture and demand band, a canvas, T-861; `MapSky` in TopBar.tsx puts it on the map, T-1868); `StatusTag.tsx` (the demand status tag on the map's top row); `BusyTag.tsx` (the busy tag after it, T-1200); `TroubleList.tsx` (the trouble list at the map's lower right, T-1433); `Guide.tsx` (the Tutorial card, T-1822; steps, notes and tick-keeping in game/guide.ts, its styles in ui/guide.css, `guideVerbose` in game/ui.ts for the tutorial-only longer hovers, T-2263; progress in the save header's `guide` through the clock worker); `KeepDot.tsx` (the yellow "Saved only in this browser" dot right of the search glass, T-1832, T-1868; the hour's count and when it is due in game/keepNudge.ts, kept per slot in localStorage by game/keepState.ts, which clockClient's downloads also mark; check checks/t1832-keep.mjs); `ripple.ts` (the card's ripple, T-1822: one fixed canvas with its own rAF loop, pulses on `data-guide` targets by the timing rules; `startRipple()` is called from `mountGuide`); `TouchBar.tsx` (the touch control bar's buttons, T-1260); `ToolNotes.tsx` (the click mode's descriptor, T-2284, tool hints, the notice and the confirmation
 dialog); `DemandSelector.tsx` (None/Homes/Destinations and the purpose filter, the track display and station ridership rows; Drives is a Settings check, T-1477); `Blueprint.tsx`
 (Build's quote, its cost breakdown by part and stretch, T-2269, and Construct, and the Select tool's selection bar on the map, T-353); `trackPrice.ts` (the track tool's price at a level and the level buttons' hovers, T-2271); `Debug.tsx` (the `?debug=1` readout); `Credits.tsx` (links to the game's about page on anita.garden and its sources section, which carries T-924's licence notices: the foot of Settings, and "About this game" on the start menu); `FeedbackPanel.tsx` (Settings' "Submit feedback" modal, sent through game/account.ts, T-1673); `MoneyText.tsx` (a money figure in the alert red while negative, and the hover of a line's money, T-722, T-1851); `PassingNote.tsx` (a one-line note on the map for a few seconds, under the edit note, T-2166); `zenmaru.css` (Zen Maru Gothic as woff2 slices by code point, T-1825); `inspector/` (one inspector
@@ -313,8 +316,12 @@ the screen when demand cannot load, T-149, T-172, T-180); `StartMenu.tsx` (the s
 
 `realRoute.worker.ts` (the real-network router: graphs joined at borders, A* with the turn limit
 and families, then the fit in steps on a track model of its own, dropped for a newer request, T-727d, T-754; the outlines of the regions with a graph sent to the page, T-913); `protocol.ts` (edit ops, `RouteAsk` for a route edit and its preview, clock messages, the network snapshot for demand), `clock.worker.ts` (owns
-the network: `TrackApi`, notes/T-025.md; money and autosave too; an edit's follow-up (state, trips, boarding hour, answer) waits behind the previews asked meanwhile, `later`, T-1407, an early track segment's until the pointer rests, `holdOn`, T-2404; `slotSummary`, a save's picture
-with a panel per city, T-894), `stateRows.ts` (`StateRows`: the state's edge, node and line rows
+the network: `TrackApi`, notes/T-025.md; money too; an edit's follow-up (state, trips, boarding hour, answer) waits behind the previews asked meanwhile, `later`, T-1407, an early track segment's until the pointer rests, `holdOn`, T-2404; `slotSummary`, a save's picture
+with a panel per city, T-894), `slots.ts` (the save slot of the game in hand, T-3734: `writeBlock`, whether and why the
+slot may not be written now; `publishSlots`, autosave, the save by hand, the saves panel's actions, the slot's lease
+against other tabs, the cloud queue; its state is the one object `saves`, which the clock worker also reads and
+writes, and it reaches the game through the `SlotHost` the worker binds; `letGoSlot` for a start or open that failed,
+whose record is game/openFailures.ts, T-3773), `stateRows.ts` (`StateRows`: the state's edge, node and line rows
 kept between edits and read from the track model again only where `take_changed_lines` and
 `take_name_changes` say they changed; station names kept by node, phase tables per line; T-1382, T-1540), `platformLines.ts` (each
 station's drawn platform line in world units, on its node row, for the complexes; T-1859), `saveFile.ts` (the save format
@@ -472,22 +479,18 @@ Run with `..\venv\Scripts\python.exe` (the maps venv).
   header. `show` prints the table.
 - `terrain_fine.py` (T-1854): the fine terrain intermediate, built once on AWS (`--kind terrain`):
   per one-degree block, the mean slope of GEDTM30's 30 m pixels per 1/960 degree cell and the mean
-  elevation per 1/240 cell, read by HTTP range from OpenGeoHub's 432 GB file, only the tiles under the
-  zone boxes, the plan's unbuilt metros and `NEXT_BOXES` (format in its docstring), with tower fields
-  cut out first (`tower_ground`, GHSL's 1 km built volume, T-1881; `run` fetches it to
-  `data/raw/ghsl/`, `TW_GHSL_30SS` another copy). Kept at home as
-  `data/work/terrain-fine/part*.tar` and `manifest.json` (3.1 GB, never unpacked); `blocks [lat_lon ...]`,
-  `run`, `check` (a block against rasterio's read). `zone_terrain.py` reads a test run's tars before
-  the intermediate's with `TW_FINE_OVER=<dir>`, and the dev server serves `.terrain` files from
-  `TW_TERRAIN=<dir>` before `data/terrain` (`vite.config.ts`).
+  elevation per 1/240 cell, read by HTTP range from OpenGeoHub's 432 GB file (format in its docstring), with
+  tower fields cut out first (`tower_ground`, GHSL's 1 km built volume, T-1881; `run` fetches it to
+  `data/raw/ghsl/`, `TW_GHSL_30SS` another copy). Since T-2901 it holds every block with a non-empty source
+  tile, so a new zone needs no run: kept at home as `data/work/terrain-fine-world/part*.tar` and `manifest.json`
+  (9.35 GB, never unpacked); `blocks [lat_lon ...]`, `run`, `check` (a block against rasterio's read).
+  `zone_terrain.Fine` reads a test run's tars before the intermediate's with `TW_FINE_OVER=<dir>`.
 - `world_terrain.py` (T-2901): the world's terrain classes, one gzip file per degree block with data
   (`build <fine> <out> [--jobs n]`, into `data/terrain-world-v2/` since T-3372; the old `data/terrain-world/` is v1, still on R2 for releases made before it) and `index.bin` (which blocks have a file), read by
   the game (`game/terrainBlocks.ts`, the terrain section of `workers/clock.worker.ts`) and published by `tools/deploy.py --terrain-world`.
-- `zone_terrain.py` (T-1270, T-1854): each registered zone's terrain classes from that intermediate
-  (thresholds, filter and cap in its docstring), written gzip to `data/terrain/<id>.terrain` (never
-  `data/packs`, so joins do not see them); `build [ids] [--force] [--jobs n]` skips files already made
-  (about 25 minutes on one core for every zone), `mix` the class shares over the files, `probe lon
-  lat km`. Its `Dem` reads GEDTM30 at 240 m (`data/raw/gedtm30/`) for `market_drives.py slope`, whose
+- `zone_terrain.py` (T-1270, T-1854): the terrain classes from that intermediate (thresholds, filter and
+  cap in its docstring) and the `.terrain` encoding, which `world_terrain.py` uses; there are no per-zone
+  files since T-2901. `mix [dir]` the class shares over the blocks, `probe lon lat km`. Its `Dem` reads GEDTM30 at 240 m (`data/raw/gedtm30/`) for `market_drives.py slope`, whose
   output `data/work/market_drives/slope60.npy` covers the world; the 10 GB raster is not kept on disk
   (T-2554), so download it from `zone_terrain.SRC_URL` only to rerun `slope`.
 - `world_water.py` (T-1285): the world's coarse water mask, `data/terrain/world.water` (served and
@@ -626,7 +629,7 @@ Run with `..\venv\Scripts\python.exe` (the maps venv).
   `ship` ships the listed cities that passed and writes `app/src/game/realNetworks.json`. `realnet.py`
   makes each listed city a `CITIES` entry (`auto_city`). Rules in its docstring; notes/T-3225.md.
   Browser check: `checks/t3225-real-load.mjs` (every city from the new game sheet to playable).
-- `realgraph.py <cc ...> [--check] [--out DIR]` (T-727b): the real network the layer draws as a routing
+- `realgraph.py <cc ...> [--check] [--out DIR] [--nori DIR]` (T-727b; freight from the extract's ways and abandoned rail from the region's `_extra.pmtiles`, kinds 8 and 9, T-3495; run with the system Python, which has pmtiles and mapbox_vector_tile): the real network the layer draws as a routing
   graph per noritetsu region, plus short undrawn track that fills its gaps (T-816), from noritetsu's
   extract, `ways.json` and `track_extra.json` (the ways tiles flag `x`, T-3043; read only), into `data/packs/realgraph/<cc>.rgr` (gzip, layout in its
   docstring, which has each chain's OSM `layer` in its flags' top bits for the real networks' levels,
@@ -663,7 +666,7 @@ only the rows of zones whose market pack changed, came or went and of places wit
 them, from `data/work/market_rows.inputs.json`, `market_pack --only`; `--rows --full` for every row, T-929;
 the joint and everyday files with pairs from the named zones only, picked by `pair_files.py`'s index,
 whose `unused --move` moves files that give no zone a pair to `data/work/retired/`, T-1976),
-`market_drives.py build` for new or moved places (the routed drives between places and each zone's
+`market_drives.py build` for new or moved places (run by the join after its market step, T-2054; the routed drives between places and each zone's
 own detour towards each partner, `data/packs/market-drives.bin`; each place's paths cached in
 `data/work/market_drives/sources/`, so only new places and places with a new or moved partner are
 routed, minutes; zone centres cached in `zones.json`, OSM's car ferries in `car_ferries.npy` from

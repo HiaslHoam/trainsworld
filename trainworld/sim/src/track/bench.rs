@@ -120,7 +120,7 @@ pub fn synth(km: f64, stations: usize, lines: usize, seed: u64) -> Network {
             run += leg;
             if run >= spacing && a.2 == V::Pi && b.2 == V::Pi && cor.pts[i - 1].2 == V::Pi && cor.pts[i + 2].2 == V::Pi {
                 let n = new_node(&mut net, (a.0 + b.0) / 2.0, (a.1 + b.1) / 2.0, cor.level);
-                net.set_station(n, Some(StationData { platform: 160, name: format!("S{n}"), named: false, built: true, off: false, upgrades: 0, berth: None, day: 0, one: 0 })).unwrap();
+                net.set_station(n, Some(StationData { platform: 160, name: format!("S{n}"), named: false, built: true, off: false, upgrades: 0, berth: None, day: 0, one: 0, fare: 0, own: String::new() })).unwrap();
                 cor.pts.insert(i + 1, (net.node_x[n as usize], net.node_y[n as usize], V::Node(n)));
                 run = 0.0;
                 i += 1;
@@ -138,7 +138,7 @@ pub fn synth(km: f64, stations: usize, lines: usize, seed: u64) -> Network {
         for p in ends {
             if let V::Node(n) = p.2 {
                 if net.node_platform[n as usize] == 0 {
-                    net.set_station(n, Some(StationData { platform: 160, name: format!("S{n}"), named: false, built: true, off: false, upgrades: 0, berth: None, day: 0, one: 0 })).unwrap();
+                    net.set_station(n, Some(StationData { platform: 160, name: format!("S{n}"), named: false, built: true, off: false, upgrades: 0, berth: None, day: 0, one: 0, fare: 0, own: String::new() })).unwrap();
                 }
             }
         }
@@ -195,7 +195,7 @@ pub fn synth(km: f64, stations: usize, lines: usize, seed: u64) -> Network {
         let express = k >= ends.len();
         k += 1;
         let (a, b) = ends[c];
-        let Some(path) = net.route(&[a, b]) else { continue };
+        let Some(path) = net.route(&[a, b], &[]) else { continue };
         let mut stops = station_nodes(net, &path);
         if express {
             let last = *stops.last().unwrap();
@@ -209,7 +209,7 @@ pub fn synth(km: f64, stations: usize, lines: usize, seed: u64) -> Network {
         }
         let id = net.alloc_line();
         let tph = if express { [6.0, 3.0, 0.0] } else { [12.0, 6.0, 3.0] };
-        net.set_line(id, Some(LineData { symbol: String::new(), trains: None, auto: None, name: format!("L{id}"), colour: 0, stops, path, tph, dwell_s: 30.0, turnaround_s: 180.0, cars: 0, fast: false, bus: None, ferry: None, group: 0, group_name: String::new(), group_look: Default::default(), day: 0, hand: false, one_way: false, limit: 0, twin: Default::default(), weekend: Default::default() })).unwrap();
+        net.set_line(id, Some(LineData { rows: 0, x: Default::default(), symbol: String::new(), trains: None, auto: None, name: format!("L{id}"), colour: 0, stops, path, tph, dwell_s: 30.0, turnaround_s: 180.0, cars: 0, fast: false, bus: None, ferry: None, group: 0, group_name: String::new(), group_look: Default::default(), day: 0, hand: false, one_way: false, limit: 0, twin: Default::default(), weekend: Default::default(), ones: vec![], fare_dist: false })).unwrap();
         made += 1;
     }
     let TrackWorld { net, .. } = w;
@@ -359,7 +359,7 @@ pub fn run(km: f64, stations: usize, lines: usize, reps: usize) -> (String, Vec<
     out += &report(&format!("move a PI 3 m on a quiet edge ({} lines)", w.net.lines_on_edge(quiet).len()), &mut w, &|w| nudge(quiet, w));
     out += &report("change one line's trains", &mut w, &|w| {
         let t = w.net.line_trains[l0 as usize].unwrap_or([0; 3]);
-        Op::TrainCounts { id: l0, trains: Some([t[0] + 2, t[1], t[2]]), tph: w.net.line_tph[l0 as usize] }
+        Op::TrainCounts { id: l0, trains: Some([t[0] + 2, t[1], t[2]]), tph: w.net.rows_of(w.net.line_tph[l0 as usize]) }
     });
     out += &report("split the busiest edge (new node)", &mut w, &|w| {
         let s = w.net.edge_len[busiest as usize] * 0.37;

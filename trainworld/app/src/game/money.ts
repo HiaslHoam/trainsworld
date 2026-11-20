@@ -23,12 +23,12 @@ import { awayNear, DAY_KINDS, kindMade, PLAIN_KIND, rushRun } from "./days";
 import { demandByDay, lineLoadsFor, type DemandView } from "./demand";
 import { cityById, isCity } from "./cities";
 import { faresFor, faresOf, lineFareMul, ownLineFare, type Fares } from "./fareCurve";
-import { roundedDefault } from "./fareDefault";
+import { countryFareScales } from "./fareDefault";
 import { lineFares } from "./fareInEffect";
 import { fareScale } from "./income";
 import { stationZone } from "./listScope";
 import { PERIODS } from "./periods";
-import { pairStats, setCarBuyCheck, setTrainBuyCheck, stopsById, world } from "./world";
+import { pairRows, pairStats, setCarBuyCheck, setTrainBuyCheck, stopsById, world } from "./world";
 import { zonesLoaded } from "./zones";
 import type { LineId, LineInput, LineStats, StationInput, WorldView } from "./types";
 import type { MoneyState, RegionNow } from "../workers/protocol";
@@ -52,7 +52,8 @@ export function setMoneyState(m: MoneyState) {
 export function trainShortfall(id: LineId, trains: readonly number[]): { need: number; have: number } | null {
   const w = world.peek(), raw = w?.lineStats[id], st = raw && pairStats(w!, raw);
   if (!st) return null;
-  const more = Math.max(...trains) - Math.max(...st.trainsNeeded);
+  // T-3542: a line of four or five rows needs its busiest row's
+  const more = Math.max(...trains) - Math.max(...(raw.rows ? pairRows(w!, raw)!.trains : st.trainsNeeded));
   return more > 0 ? carShortfall(id, more * (st.bus ? 1 : st.cars)) : null;
 }
 /** The same rule for `more` cars (buses on a bus line) a running line would need beyond the ones in
@@ -317,14 +318,19 @@ export function scalesOf(g: LineGeo, l: LineInput, byId: Map<string, StationInpu
   if (g.scales?.of !== fares || !g.scales) {
     const n = l.stops.length, sc: number[] = [], rate: number[] = [];
     for (const id of l.stops) {
-      const s = byId.get(id), c = (s && stationCountry(s)) ?? undefined;
-      const scale = fareScale(c, fares.scales), r = roundedDefault(fares, c);
-      sc.push(r && fares.base > 0 ? r.base / fares.base : scale);
-      rate.push(r && fares.perKm > 0 ? r.perKm / fares.perKm : scale);
+      const m = stopFareScales(byId.get(id), fares);
+      sc.push(m.base);
+      rate.push(m.rate);
     }
     g.scales = { of: fares, sc, from: [...rate.slice(0, n - 1), ...[...rate].reverse().slice(0, n - 1)] };
   }
   return g.scales;
+}
+/** A stop's multipliers on the curve as set: its country's (`countryFareScales`), on the base of a boarding there
+ * and on the rate of a stretch from there. T-3748, T-3753: every trip's curve extra and base extra are charged at
+ * these too, each route node's at the stop it leaves (demandClient `packService`, the demand worker's `sumAll`). */
+export function stopFareScales(s: Pick<StationInput, "id" | "lng" | "lat"> | undefined, fares: Pick<Fares, "base" | "perKm" | "scales"> & { nodes?: Fares["nodes"] }): { base: number; rate: number } {
+  return countryFareScales((s && stationCountry(s)) ?? undefined, fares);
 }
 
 /** T-1277: the country of the zone a station is in (null outside every zone). */

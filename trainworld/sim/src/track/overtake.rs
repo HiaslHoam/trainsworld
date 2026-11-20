@@ -26,6 +26,7 @@ const CYCLE_MAX_S: f64 = 7200.0;
 const CYCLE_MAX_K: usize = 12;
 /// A line running less often than this is timetabled as if it ran this often (s): a sweep's trains
 /// number the longer headway over the shorter, so a rate near zero would take it minutes (T-3238).
+/// Its shortest row where that is shorter (T-3542: rows from two hours).
 const HEADWAY_MAX_S: f64 = 4.0 * 3600.0;
 /// Results kept per plan, by the two lines' rates.
 const MEMO: usize = 8;
@@ -48,8 +49,9 @@ pub struct Point {
     /// The slower run's stop index here, or -1.
     pub stop: i32,
     pub node: u32,
-    /// Offset in the slower run.
+    /// Offset in the slower run, and in the faster run.
     pub at: f64,
+    pub fat: f64,
 }
 
 /// What a plan comes to at one pair of rates.
@@ -78,7 +80,7 @@ pub struct Plan {
     next: Vec<usize>,
     /// What a train keeps behind the one ahead (s), at the faster run's speed.
     pub spacing: f64,
-    memo: Mutex<Vec<([u32; 2], Arc<Outcome>)>>,
+    memo: Mutex<Vec<([u32; 3], Arc<Outcome>)>>,
 }
 
 /// The plan for path entries `i0..=i1` of the faster run `fr`, shared with the slower run `sr` from
@@ -115,9 +117,10 @@ pub fn plan(net: &Network, fast: (u32, u8), fr: &Run, slow: (u32, u8), sr: &Run,
             stop: ss.map_or(-1, |x| x as i32),
             node,
             at: sr.node_s[j],
+            fat: fr.node_s[k],
         });
     }
-    points.push(Point { slow: [reach_at(sr, sb) - s0; 2], fast: [reach_at(fr, fb) - f0; 2], passing: false, stop: -1, node: fr.nodes[i1 + 1], at: sb });
+    points.push(Point { slow: [reach_at(sr, sb) - s0; 2], fast: [reach_at(fr, fb) - f0; 2], passing: false, stop: -1, node: fr.nodes[i1 + 1], at: sb, fat: fb });
     let n = points.len();
     let next = (0..n).map(|p| (p + 1..n).find(|&q| points[q].passing).unwrap_or(n - 1)).collect();
     Some(Plan { fast, slow, start: [leave_at(sr, sa) - s0, leave_at(fr, fa) - f0], points, next, spacing, memo: Mutex::new(vec![]) })
@@ -128,8 +131,8 @@ pub fn plan(net: &Network, fast: (u32, u8), fr: &Run, slow: (u32, u8), sr: &Run,
 /// lines both set to 10 minutes then meet at the same stations every trip rather than drift apart.
 pub fn pattern_tph(net: &Network, l: u32, lev: usize) -> f32 {
     let tph = net.line_tph[l as usize][lev];
-    match net.line_auto[l as usize] {
-        Some(a) if a[lev] > 0 && tph as f64 * a[lev] as f64 * AUTO_SLACK >= 3600.0 - 1e-6 => (3600.0 / a[lev] as f64) as f32,
+    match net.auto_at(l as usize, lev) {
+        Some(a) if a > 0 && tph as f64 * a as f64 * AUTO_SLACK >= 3600.0 - 1e-6 => (3600.0 / a as f64) as f32,
         _ => tph,
     }
 }
@@ -161,14 +164,26 @@ struct Train {
 }
 
 impl Plan {
+    /// The next passing point after point `p`, or the stretch's end.
+    pub fn next_passing(&self, p: usize) -> usize {
+        self.next[p]
+    }
+
+    /// T-3542's headway cap for a sweep of these two lines (`outcome`), for `timing`'s.
+    pub fn headway_cap(&self, net: &Network) -> f64 {
+        [self.fast.0, self.slow.0].iter().map(|&l| net.mix(l as usize).map_or(HEADWAY_MAX_S, |m| (2.0 * m.lead_max_s).min(HEADWAY_MAX_S))).fold(HEADWAY_MAX_S, f64::min)
+    }
+
     /// The outcome at level `lev`, at the headways the lines keep now (`pattern_tph`).
     pub fn outcome(&self, net: &Network, lev: usize) -> Arc<Outcome> {
         let (tf, ts) = (pattern_tph(net, self.fast.0, lev), pattern_tph(net, self.slow.0, lev));
-        let key = [tf.to_bits(), ts.to_bits()];
+        // T-3542: a line with rows shorter than four hours caps its headway at its shortest row
+        let cap = self.headway_cap(net);
+        let key = [tf.to_bits(), ts.to_bits(), cap as u32];
         if let Some(o) = self.memo.lock().unwrap().iter().find(|m| m.0 == key) {
             return o.1.clone();
         }
-        let o = Arc::new(self.best(tf as f64, ts as f64));
+        let o = Arc::new(self.best(tf as f64, ts as f64, cap));
         let mut m = self.memo.lock().unwrap();
         if m.len() >= MEMO {
             m.remove(0);
@@ -179,12 +194,12 @@ impl Plan {
 
     /// The relative phase (of `PHASES` a faster headway) with the least waiting, loss and time the
     /// slower trains are held behind faster ones (`Outcome::behind`) an hour.
-    fn best(&self, tf: f64, ts: f64) -> Outcome {
+    fn best(&self, tf: f64, ts: f64, cap: f64) -> Outcome {
         let n = self.points.len();
         if !(tf > 0.0 && ts > 0.0) {
             return Outcome { loss: 0.0, waits: vec![0.0; n], behind: 0.0, offset: 0.0 };
         }
-        let (hf, hs) = ((3600.0 / tf).min(HEADWAY_MAX_S), (3600.0 / ts).min(HEADWAY_MAX_S));
+        let (hf, hs) = ((3600.0 / tf).min(cap), (3600.0 / ts).min(cap));
         let c = cycle(hs, hf);
         let mut best: Option<(f64, Outcome)> = None;
         for k in 0..PHASES {
@@ -201,7 +216,7 @@ impl Plan {
     /// whole cycles, its wait at each point: for checks.
     pub fn trains_at(&self, hs: f64, hf: f64) -> (Outcome, Vec<Vec<f64>>) {
         let (hs, hf) = (hs.min(HEADWAY_MAX_S), hf.min(HEADWAY_MAX_S));
-        let o = self.best(3600.0 / hf, 3600.0 / hs);
+        let o = self.best(3600.0 / hf, 3600.0 / hs, HEADWAY_MAX_S);
         let c = cycle(hs, hf);
         self.sweep(hs, hf, o.offset, (3600.0 / c).ceil().max(1.0) * c)
     }
@@ -326,5 +341,55 @@ pub fn passing_spots(net: &Network, lines: &[LineSvc], l: u32) -> Vec<u32> {
     out
 }
 
+/// A faster train at a passing station, as the timetable runs it (T-3346 stage 2): when it leaves
+/// or passes the station (game time, s); how long after that a slower train stepping out behind it
+/// leaves; how long it and the slower train take from there to the next passing point; the
+/// spacing; and one faster headway and the lead, the longest a slower train waits for it on that
+/// side (T-3238).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Pass {
+    pub at: f64,
+    pub lead: f64,
+    pub run_f: f64,
+    pub run_s: f64,
+    pub spacing: f64,
+    pub most: f64,
+}
+
+/// T-3346 stage 2: each slower train's own waits at its passing stations, as `Plan::sweep` has a
+/// slower train wait, against the faster trains as the timetable runs them. `deps`: the slower
+/// trains' departures (game time, any list: a day's, or a cycle's) and each one's headway.
+/// `stations`, in run order: the stop, when a train with no waits leaves it after its departure
+/// (s), and the faster trains there by `at`. A train waits at most its headway less the spacing
+/// (T-3238) and `Pass::most`. Per departure, per station, its wait (s).
+pub fn train_waits(deps: &[(f64, f64)], stations: &[(usize, f64, Vec<Pass>)]) -> Vec<Vec<f64>> {
+    let leads: Vec<f64> = stations.iter().map(|s| s.2.iter().map(|p| p.lead).fold(0.0, f64::max)).collect();
+    deps.iter()
+        .map(|&(d, hs)| {
+            let mut acc = 0.0;
+            stations
+                .iter()
+                .zip(&leads)
+                .map(|((_, off, passes), &most_lead)| {
+                    let normal = d + off + acc;
+                    let mut dep = normal;
+                    let i = passes.partition_point(|p| p.at + most_lead <= dep);
+                    for p in &passes[i..] {
+                        if p.at + p.lead <= dep {
+                            continue;
+                        }
+                        if p.at + p.run_f >= dep + p.run_s + p.spacing || p.at + p.lead - normal > (hs - p.spacing).min(p.most) {
+                            break;
+                        }
+                        dep = p.at + p.lead;
+                    }
+                    acc += dep - normal;
+                    dep - normal
+                })
+                .collect()
+        })
+        .collect()
+}
+
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;

@@ -12,6 +12,7 @@ import type { BuildingInput, EdgeId, Level, NodeId } from "../game/types";
 import type { FrameSpec } from "../game/frame";
 import type { LineShape } from "../game/lineShape";
 import type { Loan } from "../game/loan";
+import type { FareArea } from "../game/fareCurve";
 import type { Achieved, DayLedger, GameMode, GuideSave, HourLedger, NewGameSpec, PendingLoad, SaveSlot, SlotBackup } from "./saveFile";
 import type { NetworkBuffers } from "../map/network";
 import type { CloudContext } from "./cloud";
@@ -103,14 +104,23 @@ export type EditOp =
   | { op: "oneWays"; edges: EdgeId[]; dirs: (0 | 1 | 2 | 3)[] }
   /** T-3405: a speed limit on pieces of track, km/h, 0 for none; free */
   | { op: "pieceLimit"; edges: EdgeId[]; kmh: number }
+  /** a station's platform; a `name` other than the one it shows renames it as `renameStation` does */
   | { op: "stationProps"; node: NodeId; platform: number; name: string }
+  /** T-3759: rename a station: an unbound one alone, a bound one renames its complex */
+  | { op: "renameStation"; node: NodeId; name: string }
+  /** T-3759: rename the complex station `node` is in (its unbound stations keep their names) */
+  | { op: "renameComplex"; node: NodeId; name: string }
+  /** T-3759: bind a station to its complex's name, or unbind it */
+  | { op: "bindStation"; node: NodeId; bound: boolean }
+  /** T-3759: bind every station to its complex's name, one undo */
+  | { op: "bindAll" }
+  /** T-3794: unbind these stations, each keeping the name it shows now (`names[i]` for `nodes[i]`), one undo */
+  | { op: "unbindAll"; nodes: NodeId[]; names: string[] }
   /** T-3332: a station's platforms on one track (`one`) or both; a constructed one pays the difference to both, nothing back to one */
   | { op: "stationTracks"; node: NodeId; one: boolean }
   | { op: "stationWay"; node: NodeId; heading: number }
   /** T-3332: a one-track station on double track turned round, its platform on the other track */
   | { op: "reverseStation"; node: NodeId }
-  /** T-3288: the name a complex goes by, set on the station the others follow; no typed name */
-  | { op: "stationName"; node: NodeId; name: string }
   | { op: "removeStation"; node: NodeId }
   /** `buses` (T-1464): bus lines whose routes to construct */
   | { op: "construct"; edges: EdgeId[]; stations: NodeId[]; buses?: number[] }
@@ -143,6 +153,9 @@ export type EditOp =
   /** T-648: the station put in where the line tool's search fits it best (`TrackApi::insert_stop`),
    * then set as `setStops`; refused with "InsertStop" when no track joins it in */
   | { op: "insertStop"; line: number; station: NodeId; autoFast?: boolean }
+  /** T-3711, a shift-click in the line tool: the station made a stop served one way only (added where insertStop
+   * puts it if it is no stop yet), or such a stop served both ways again; refused as insertStop */
+  | { op: "oneWayStop"; line: number; station: NodeId; autoFast?: boolean }
   /** T-1791, the group view's stop edits, all keeping the line's path: stop `index` out (an end's removal cuts the path back), the line ended at stop `index` (the stops past it toward the nearer end go), a station the line passes made a stop; refused with "LinePath" */
   | { op: "dropStop"; line: number; index: number }
   | { op: "endLineAt"; line: number; index: number }
@@ -165,6 +178,20 @@ export type EditOp =
   /** T-3521: every line's weekends at a percent of its weekdays, as one edit
    * (`TrackApi.set_weekend_share_all`) */
   | { op: "weekendShareAll"; share: number }
+  /** T-3542: the rows (3, 4 or 5) the lines set their trains in: the game's (no `line`) or one line's
+   * own (0: the game's), rows joined taking the most of theirs (`TrackApi.set_game_periods`,
+   * `set_line_periods`); and one line's whole trains or headways per row, in the day's order
+   * (`set_line_row_trains`, `set_line_row_headways`) */
+  | { op: "setPeriods"; line?: number; rows: number }
+  | { op: "setRowTrains"; line: number; trains: number[] }
+  | { op: "setRowHeadways"; line: number; seconds: number[] }
+  /** T-3542: the hours the lines split their day at, five (where the morning, midday, afternoon, evening
+   * and night start; game/periods.ts `Cuts`): the game's (no `line`) or one line's own (empty: the game's;
+   * `TrackApi.set_game_hours`, `set_line_hours`) */
+  | { op: "setHours"; line?: number; cuts: number[] }
+  /** T-3542: a line of four or five rows' weekend trains per row by hand, and the headways stepped
+   * to (empty: kept where the count did not change; `TrackApi.set_line_row_weekend`) */
+  | { op: "rowWeekend"; line: number; counts: number[]; headways: number[] }
   /** a field left out keeps the line's own as the worker has it now, so an edit never carries a stale
    * name, colour or symbol over one still on its way (T-1812); `letter` is the symbol set by hand, "" for none */
   | { op: "lineLook"; line: number; name?: string; colour?: string; letter?: string }
@@ -177,6 +204,8 @@ export type EditOp =
   | { op: "linePairs"; line: number; on: boolean }
   /** T-2987: a rail line's speed limit in km/h, 0 for none */
   | { op: "lineLimit"; line: number; kmh: number }
+  /** T-3758: a line (any kind) pays the distance fare where the game has fare zones, or zone fares */
+  | { op: "lineFareDist"; line: number; dist: boolean }
   /** T-1791: put lines in a group (a line's group number, "new" for a fresh one, 0 for none), or name one ("" for its oldest line's name); one undoable edit, no service change */
   | { op: "lineGroup"; lines: number[]; group: number | "new" }
   | { op: "groupName"; group: number; name: string }
@@ -196,6 +225,10 @@ export type EditOp =
   /** T-3567: line `line`'s own fare multiplier, 0 to 3 (1: none); refused for a line that is gone */
   | { op: "fareLine"; line: number; mul: number }
   | { op: "fareTransfer"; usd: number }
+  /** T-3740: the fare areas as a whole (game/fareZones.ts), and at least this next id; a setting, not undoable */
+  | { op: "fareZones"; zones: FareArea[]; zoneNext?: number }
+  /** T-3740: stations' fare zone codes (one each, or one for all; 0 none), one undoable edit */
+  | { op: "stationFares"; nodes: NodeId[]; codes: number[] }
   /** T-1661: take a loan of `amount` US$M (one of `LOAN_AMOUNTS`, none out), or pay off what is left of it; refused otherwise */
   | { op: "borrow"; amount: number }
   | { op: "repay" }
@@ -227,6 +260,8 @@ export type ToClock =
       guide?: boolean;
       /** T-2703: reads of the saved game to fail on purpose, for checks (`?debug=1&readFails=N`) */
       readFails?: number;
+      /** T-3773: the next game opened panics after its decode, for checks (dev server, `?debug=1&loadPanic=1`); "late": the first load after the game has opened (T-3788) */
+      loadPanic?: boolean | "late";
       /** T-2802: the least the WASM memory grows by, bytes (`heapStep` in deviceMemory.ts) */
       heapStep?: number }
   /** T-2802: every zone's coarse outline, the page's parse of `packs/outlines.json` (null: unavailable), after init */
@@ -255,7 +290,9 @@ export type ToClock =
    * demand is answered before its state is built, so the next ghost is not kept waiting */
   /** `rows` (T-2766, the line tool's stop clicks): the world's rows are posted and the edit answered at once, its
    * network, trips and boarding once no stop click has come for a moment; a stop click before then joins them */
-  | { kind: "edit"; seq: number; op: EditOp; early?: boolean; rows?: boolean;
+  /** `game` (T-3734): the game the edit was made in, `loaded`'s `game` when it was made; one of another game is refused
+   * unapplied. Only edits queued behind others carry it (stop edits); an edit without one is the game in hand's. */
+  | { kind: "edit"; seq: number; op: EditOp; early?: boolean; rows?: boolean; game?: number;
       /** co-op (game/coop.ts): the game time the edit takes effect at and its lead, as the host's worker applied it,
        * so a guest's departures change at the same moment; the clock's own otherwise */
       at?: number; lead?: number }
@@ -289,8 +326,8 @@ export type ToClock =
    * speed: game seconds `t` at wall time `at` (performance.timeOrigin + performance.now(), the
    * clock game/clock.ts runs on, never Date.now(): T-488), moving `rate` game s per wall s (0
    * when stopped). The worker settles money by the game hour from it (T-028). `game`: the last
-   * "loaded" message's `game` the main thread had seen; the worker ignores a clock from before
-   * its latest load (T-715). */
+   * "loaded" message's `game` the main thread had seen; the worker drops a clock from before
+   * its latest load (T-715) where it drops a stop edit's (T-3734). */
   | { kind: "clock"; t: number; rate: number; at: number; game: number }
   /** fare income in force, US$M per game hour for each of the five periods (from demand riders,
    * game/money.ts), one table per kind of day (T-260, game/days.ts `DayKind` order); `lines` the
@@ -355,6 +392,8 @@ export type ToClock =
   | { kind: "lineShape"; line: string; shape: LineShape | null }
   /** T-3543: the headways (seconds at high, medium, low) new lines start with, null for the game's counts; outside the undo history */
   | { kind: "newHeadway"; seconds: import("./saveFile").NewHeadways }
+  /** T-3759: new stations start bound to their complex's name (the player's setting, `DisplaySettings.bindNew`) */
+  | { kind: "bindNew"; on: boolean }
   /** T-3420: the line ids the player hid on the map; outside the undo history */
   | { kind: "hideLines"; lines: string[] }
   /** `restore`: `key` is a backup's (T-744) */
@@ -370,7 +409,7 @@ export type ToClock =
   | {
       kind: "query";
       seq: number;
-      q: { what: "insertStop"; line: number; station: number } | { what: "stopTiers"; line: number } | { what: "stopGap"; line: number; station: number } | { what: "passedStations"; line: number } | { what: "junction"; node: number } | { what: "lineDelays"; line: number; level: number } | { what: "lineWaits"; line: number; level: number } | { what: "passingSpots"; line: number } | { what: "lineHeld"; line: number } | { what: "lineMarks"; line: number } | { what: "lineProfile"; line: number } |{ what: "lineRelated"; line: number } | { what: "lineTrips"; line: number; t0: number; t1: number } | { what: "stationDeps"; line: number; node: number; t0: number; t1: number } | { what: "edgePis"; edge: number } | { what: "flyover"; node: number } | { what: "upgradeCost"; node: number } | { what: "tracksCost"; node: number } | { what: "upgradeCosts"; nodes: number[]; bit: number } |{ what: "platformCost"; nodes: number[]; platform: number } | { what: "doubleUp"; edge: number } | { what: "oneWays"; edges: number[]; dirs: number[] } | { what: "lineAccount"; line: number; day: number } | { what: "linePeriods"; line: number; day: number } | { what: "linesPeriods"; lines: number[]; day: number } |{ what: "today" } | { what: "removal"; edges: number[]; stations: number[] } | { what: "busQuote"; line: number; route: number[] } | { what: "rebuildQuote"; edges: number[]; stations: number[]; level: number | null; kind: number; tracks: number } | { what: "blueprintQuote" } | { what: "blueprintPieces" } | { what: "lineCost"; line: number } | { what: "buildingQuote"; id: number | null; corners: number[] } | { what: "linePairs"; line: number };
+      q: { what: "insertStop"; line: number; station: number } | { what: "stopTiers"; line: number } | { what: "stopGap"; line: number; station: number } | { what: "passedStations"; line: number } | { what: "junction"; node: number } | { what: "lineDelays"; line: number; level: number; period?: number } | { what: "lineWaits"; line: number; level: number; period?: number } | { what: "passingSpots"; line: number } | { what: "lineHeld"; line: number; rows?: boolean } | { what: "lineMarks"; line: number } | { what: "lineProfile"; line: number } |{ what: "lineRelated"; line: number } | { what: "lineTrips"; line: number; t0: number; t1: number } | { what: "stationDeps"; line: number; node: number; t0: number; t1: number } | { what: "edgePis"; edge: number } | { what: "flyover"; node: number } | { what: "upgradeCost"; node: number } | { what: "tracksCost"; node: number } | { what: "upgradeCosts"; nodes: number[]; bit: number } |{ what: "platformCost"; nodes: number[]; platform: number } | { what: "doubleUp"; edge: number } | { what: "oneWays"; edges: number[]; dirs: number[] } | { what: "lineAccount"; line: number; day: number } | { what: "linePeriods"; line: number; day: number } | { what: "linesPeriods"; lines: number[]; day: number } |{ what: "today" } | { what: "removal"; edges: number[]; stations: number[] } | { what: "busQuote"; line: number; route: number[] } | { what: "rebuildQuote"; edges: number[]; stations: number[]; level: number | null; kind: number; tracks: number } | { what: "blueprintQuote" } | { what: "blueprintPieces" } | { what: "lineCost"; line: number } | { what: "buildingQuote"; id: number | null; corners: number[] } | { what: "linePairs"; line: number };
     };
 
 /** T-531: each region's today and this hour, as the "cash" message carries them. */
@@ -387,9 +426,10 @@ export interface MoneyState {
   copy?: boolean;
   /** T-3707: played in a page that is not the published game, or with a mod (`SaveHeader.modded`): never ranks */
   modded?: boolean;
-  /** T-3687: the save slot this game is played in ("" for none). A load sends the new game's money before the slot
-   * list says it is playing, so the page scores a game only while the two name the same slot. */
-  slot: string;
+  /** T-3734: the game this money is (the worker's load count, `loaded`'s `game`). A load sends the new game's money
+   * before the slot list says it is playing, so the page scores a game only while this is the slot list's `game`
+   * (T-3687). */
+  game: number;
   /** cars owned, and the cars the running lines need */
   fleet: number;
   carsNeeded: number;
@@ -445,9 +485,9 @@ export interface MoneyState {
   economy: number;
   /** T-1661, T-2022: the loan out, null for none */
   loan: Loan | null;
-  fares: { base: number; perKm: number; nodes: [number, number][]; scales?: Record<string, number>; baseline?: string; basis?: "usd"; income?: number; hsr?: number; ferry?: number; bus?: number; transfer?: number; lines?: Record<string, number> };
-  /** running cost per game hour at high, medium, low demand */
-  runningPerHour: [number, number, number];
+  fares: { base: number; perKm: number; nodes: [number, number][]; scales?: Record<string, number>; baseline?: string; basis?: "usd"; income?: number; hsr?: number; ferry?: number; bus?: number; transfer?: number; lines?: Record<string, number>; zones?: FareArea[]; zoneNext?: number };
+  /** running cost per game hour in each demand period on weekdays (T-3542: five, `PERIODS`) */
+  runningPerHour: number[];
   /** recent game days, oldest first; the last is today so far (as of the last whole hour; the
    * "cash" message carries today as fares land, T-284) */
   ledger: DayLedger[];
@@ -526,15 +566,22 @@ export interface ClockNode {
   stationOff: boolean;
   /** the station's upgrades, `UPGRADE` bits (T-1281) */
   upgrades: number;
+  /** T-3740: the station's fare zone code (game/fareZones.ts), only where it has one */
+  fare?: number;
   /** T-3332: a one-track station: 1 on double track (`oneHeading` its trains' way), 2 on single track, where trains cannot pass */
   one?: 1 | 2;
   /** T-3332: the heading of a one-track station's trains on double track, rad, counter-clockwise from east */
   oneHeading?: number;
   /** one platform track (a one way station, or a stop on single track with no passing loop): pays `upkeepOnePlatform` of the station upkeep */
   onePlatform?: true;
+  /** the name it shows (T-3759, `StateRows.foldNames`): its own while unbound, else its complex's */
   name: string;
   /** the player typed the name (T-2683) */
   named?: true;
+  /** T-3759: not bound to its complex's name: the name it shows, its own */
+  own?: string;
+  /** T-3759: its complex's name, where that is not the name it shows */
+  hub?: string;
   /** track heading through it, rad, counter-clockwise from east */
   heading: number;
   /** a station's platform line (T-1859, `StationInput.line`, workers/platformLines.ts) */
@@ -612,6 +659,8 @@ export interface ClockLine {
   endTurns: number[];
   /** T-3122: `[node, heading]` per station it serves one way only, the heading in radians, world frame (`TrackApi::line_stop_ways`) */
   ways: number[];
+  /** T-3711: the stops the player made one way with a shift-click (`TrackApi::line_one_stops`) */
+  oneStops: number[];
   /** T-2895: the player set its stop order by hand (`TrackApi::line_hand`) */
   hand: boolean;
   /** a loop (`TrackApi::line_loop`, T-798): 0 none, 1 a circle, 2 a balloon */
@@ -620,6 +669,9 @@ export interface ClockLine {
   oneWay: boolean;
   /** T-2987: the line's speed limit, km/h; 0 for none (`TrackApi::line_limit`) */
   limit: number;
+  /** T-3758: its rides pay the distance fare where the game has fare zones (`TrackApi::line_fare_dist`); absent:
+   * zone fares */
+  fareDist?: true;
   /** T-3521: the line's weekends (`TrackApi::line_weekend`): its percent, 1 where its counts are set
    * by hand, then its whole trains on weekends, high, medium, low; absent: the weekdays' at 100% */
   weekend?: number[];
@@ -632,6 +684,20 @@ export interface ClockLine {
   pairs?: 1 | 2;
   /** T-3333: a hidden twin, the line it runs the other pair for (`TrackApi::line_twin_of`) */
   twinOf?: number;
+  /** T-3542: its trains an hour in each of the five periods, weekdays (`TrackApi::line_tph_by_period`) */
+  tphP: number[];
+  /** T-3542: the rows it sets its trains in (3, 4 or 5; `line_period_count`) and its own choice (0:
+   * the game's; `line_periods_own`) */
+  periods: number;
+  periodsOwn: number;
+  /** T-3542: the hours it splits its day at, five (`line_hours`), and whether they are its own
+   * (`line_hours_own`) */
+  hours: number[];
+  hoursOwn: boolean;
+  /** T-3542: a line of four or five rows: per row in the day's order its figures (`line_rows`), its
+   * whole trains as set (`line_row_trains`), its headways (`line_row_headways`, absent on counts) and
+   * its weekends (`line_row_weekend`) */
+  rows?: { figs: number[]; set: number[]; auto?: number[]; weekend: number[] };
   /** T-1464: a bus line's route and stops; absent for a rail line, whose `path` this replaces
    * (a bus line's `path` is empty, its `stops` its `bus.stops`' ids) */
   bus?: ClockBus;
@@ -721,11 +787,15 @@ export interface RowsDelta<T> {
 
 export interface ClockState {
   version: number;
-  /** busy resources per demand level (high, medium, low) */
+  /** busy resources per demand period (T-3542: five, `PERIODS`; periods served by one slot share one array) */
   markers: CapacityMarker[][];
-  /** T-819: per demand level, track sections at capacity, `TrackApi.full_track`: per edge on one
+  /** T-819: per demand period, track sections at capacity, `TrackApi.full_track_in`: per edge on one
    * edge id, utilisation, trains an hour */
   fullTrack: Float64Array[];
+  /** T-3542: the rows (3, 4 or 5) lines following the game's set their trains in (`TrackApi.game_periods`) */
+  periods: number;
+  /** T-3542: the hours lines following the game's split their day at (`TrackApi.game_hours`) */
+  hours: number[];
   /** US$M */
   cash: number;
   builtCost: number;
@@ -859,10 +929,14 @@ export type FromClock =
   /** a game was loaded or started (`from`), at game time `clock`; a failed import says why in
    * `error` and changes nothing;
    * `frame`: the game now in the worker; `converted`: its save was in an older frame and was
-   * converted to the world's on the way in (T-308); `game` counts the worker's loads, for "clock"; `slot`, the
+   * converted to the world's on the way in (T-308); `game` counts the worker's loads: the stamp of the game now in
+   * hand (T-715, T-3734), which "clock", "money", "saveSlots" and stop edits carry; `slot`, the
    * slot the game goes into (a file's new slot is made active only after this message, T-2552) */
   // (`reason` "rebuilt", T-2848: the same game, on a model rebuilt after a panic)
   | { kind: "loaded"; from: "autosave" | "file" | "new"; clock: number; frame: FrameSpec; error?: string; why?: string; converted?: boolean; game: number; slot?: string; reason?: "rebuilt" }
+  /** T-3773: the game the page started with did not open (`error` a message key or text, `why` a panic's): the worker
+   * holds no slot and the page goes to the start menu. `slot`: the saved game's slot, `from` what was opened, `name` it */
+  | { kind: "openFailed"; from: "slot" | "file" | "restore" | "view" | "new"; slot?: string; name: string; error: string; why?: string }
   /** T-1196: "leave" done (the page may reload), or why the game in hand could not be saved */
   | { kind: "left"; error?: string }
   /** T-889: a save being loaded: its built stations' x, y in `frame`, before its network is worked out;
@@ -913,7 +987,9 @@ export type FromClock =
   /** `backups`: the active slot's (T-744), newest first; `newer`: a newer build saved the game in
    * hand, which is not written here (T-1826) */
   /** `viewing` (T-3257): the game in hand is a network viewed from Community, in no slot: its card, `key` "" */
-  | { kind: "saveSlots"; slots: SaveSlot[]; active: string; writable: boolean; at: number; reason?: string; error?: string; backups: SlotBackup[]; newer?: boolean; viewing?: SaveSlot }
+  /** `game` (T-3734): the game `active` holds, as `loaded`'s `game`; during a load into another slot still the game
+   * being left */
+  | { kind: "saveSlots"; slots: SaveSlot[]; active: string; game: number; writable: boolean; at: number; reason?: string; error?: string; backups: SlotBackup[]; newer?: boolean; viewing?: SaveSlot }
   | { kind: "error"; message: string }
   /** T-988: the server refused the session's token (the main thread signs out) */
   | { kind: "accountGone" }
@@ -947,7 +1023,7 @@ export interface NetworkSnapshot {
   stations: SnapshotStation[];
   lines: SnapshotLine[];
   /** The player's fare curve (game/fareCurve.ts): its first stretch as a base and rate, and its nodes. */
-  fare?: { base: number; perKm: number; nodes?: [number, number][]; scales?: Record<string, number> };
+  fare?: { base: number; perKm: number; nodes?: [number, number][]; scales?: Record<string, number>; zones?: FareArea[] };
   /** station pairs joined by a passage (T-1281), node ids; absent when there are none */
   passages?: [number, number][];
 }
@@ -968,6 +1044,8 @@ export interface SnapshotStation {
   complex?: number;
   /** its upgrades, `UPGRADE` bits (T-1281), only where it has any */
   upgrades?: number;
+  /** T-3740: its fare zone's code (game/fareZones.ts), only where it has one and the fares have areas */
+  fare?: number;
   /** T-1464: a bus stop that is no station (id from `bus::STOP_ID_BASE` up, platform 0), reached
    * only through its line's corridor (`SnapshotLine.catches`) */
   bus?: true;
@@ -982,23 +1060,28 @@ export interface SnapshotLine {
   /** T-3348: run 1's stations in `stops` order, where a stop's way back is at a platform beside it
    * (`TrackApi.line_back_stops`, one-way track); absent where every stop is the same both ways */
   backStops?: number[];
-  /** trains an hour at high, medium, low demand (SPEC 6.3; periods in sim/src/track/params.rs) */
-  tph: [number, number, number];
+  /** trains an hour in each demand period (`PERIODS`, T-3542; SPEC 6.3) */
+  tph: number[];
   /**
-   * Per run (0 = stops in order, 1 = reversed), per demand level (0 high, 1 medium, 2 low):
+   * Per run (0 = stops in order, 1 = reversed), per demand period (`PERIODS`, T-3542):
    * seconds from leaving stop i to arriving at stop i + 1, capacity holds on the way included.
-   * `hopS[run][level].length === stops.length - 1`; run 1's hops are in its own travel order.
+   * `hopS[run][period].length === stops.length - 1`; run 1's hops are in its own travel order.
    */
   hopS: number[][][];
   /** Actual track km per segment, in each run's travel order. Legacy snapshots omit it. */
   hopKm?: number[][];
   /** T-1626: high-speed trains, whose fares are times the high-speed multiplier */
   fast?: boolean;
+  /** T-3758: its rides pay the distance fare where the game has fare zones; only while the fares have areas */
+  fareDist?: boolean;
+  /** T-3758: per run and hop (as `hopKm`), the fare zone codes of the stations it passes without stopping; only
+   * while the fares have areas and some hop passes a station with a zone */
+  passFares?: number[][][];
   /** T-2195: a ferry line, whose fares are times the ferry multiplier; its stops are ports */
   ferry?: boolean;
   /** T-2926: a line on tram track (`DemandApi.set_tram_lines`) */
   tram?: boolean;
-  /** dwell at each stop, s, per run and level, in the run's own stop order (0 at both ends) */
+  /** dwell at each stop, s, per run and period, in the run's own stop order (0 at both ends) */
   dwellS: number[][][];
   /** layover at each end, s */
   turnaroundS: number;

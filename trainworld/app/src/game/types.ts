@@ -47,8 +47,14 @@ export interface StationInput {
   off?: boolean;
   /** its upgrades, `UPGRADE` bits (game/upgrades.ts, T-1281) */
   upgrades?: number;
+  /** T-3740: its fare zone's code (game/fareZones.ts), only where it has one; its area may be gone */
+  fare?: number;
   /** the player typed its name (T-2683): a complex shows it above the others' */
   named?: true;
+  /** T-3759: not bound to its complex's name: `name` is its own */
+  unbound?: true;
+  /** T-3759: its complex's name, where that is not `name` (`complexTitle`) */
+  hub?: string;
   /** track heading through it, rad, counter-clockwise from east */
   heading: number;
   /** its platform's centre line along its track, as drawn: x, y offsets from x, y in world units
@@ -82,6 +88,8 @@ export interface LineInput {
   planStops?: StationId[];
   stopStart?: number;
   tph: Tph;
+  /** T-3542: trains an hour in each of the five periods (`PERIODS`), weekdays */
+  tphP: number[];
   /** the player's line group (T-1791), absent for none, and its name, "" for its oldest line's */
   group?: number;
   groupName?: string;
@@ -232,6 +240,8 @@ export interface LineStats {
   /** T-3348: the stations the return run stops at, first stop to last, where one is a platform beside
    * the listed stop (`TrackApi::line_back_stops`) */
   backStops?: string[];
+  /** T-3711: the stops the player made one way with a shift-click; absent for none */
+  oneStops?: string[];
   /** T-2895: the player set its stop order by hand (`TrackApi::line_hand`) */
   hand: boolean;
   /** a loop (T-798): its last stop is its first; a circle carries on round there, a balloon turns
@@ -241,6 +251,8 @@ export interface LineStats {
   oneWay: boolean;
   /** T-2987: the player's speed limit for the line's trains, km/h; 0 for none */
   limit: number;
+  /** T-3758: its rides pay the distance fare where the game has fare zones; absent: zone fares */
+  fareDist?: true;
   /** T-3521: the line's weekends (`ClockLine.weekend`): its percent, 1 where its counts are set by
    * hand, then its whole trains on weekends, high, medium, low, then the headways stepped to in
    * seconds (0 none); absent: the weekdays' at 100% */
@@ -254,9 +266,34 @@ export interface LineStats {
   twin?: LineId;
   /** T-3333: a hidden twin, the line it runs the other pair for */
   twinOf?: LineId;
+  /** T-3542: the rows it sets its trains in (3, 4 or 5) and its own choice (0: the game's) */
+  periods: number;
+  periodsOwn: number;
+  /** T-3542: the hours it splits its day at (five, `Cuts`), and whether they are its own */
+  hours: number[];
+  hoursOwn: boolean;
+  /** T-3542: a line of four or five rows: its figures per row in the day's order (`RowFigs`) */
+  rows?: RowFigs;
   /** T-1464: a bus line's route and stops (its stops that are no station are in `nodes` only,
    * never in the save's stations); absent for a rail line */
   bus?: import("../workers/protocol").ClockBus;
+}
+
+/** T-3542: a line of four or five rows, per row in the day's order (sim `line_rows`, `line_row_trains`,
+ * `line_row_headways`, `line_row_weekend`). A row over several slots shows the longest round trip,
+ * the most trains and the fewest trains an hour of them. */
+export interface RowFigs {
+  roundTrip: number[];
+  /** trains the service runs (as `LineStats.trainsNeeded`) */
+  trains: number[];
+  delay: number[];
+  /** trains an hour on weekdays; on weekends with a hidden twin's (as `restTph`) */
+  tph: number[];
+  restTph: number[];
+  /** headway in seconds when the trains follow it, else null (as `autoS`) */
+  auto: number[] | null;
+  /** weekends as `LineStats.weekend`: percent, 1 set by hand, counts per row, headways per row */
+  weekend: number[];
 }
 
 export interface ModeSplit {
@@ -309,11 +346,15 @@ export interface BlueprintItem {
 export interface WorldView {
   /** the clock worker's state version */
   version: number;
-  /** busy resources per demand level (SPEC 6.2), local units */
+  /** busy resources per demand period (SPEC 6.2; T-3542: five, `PERIODS`), local units */
   capacity: { x: number; y: number; rho: number; delayS: number; kind: number; tph: number; held: boolean }[][];
-  /** T-819: per demand level, the edges whose track is at capacity, with the fuller direction's
+  /** T-819: per demand period, the edges whose track is at capacity, with the fuller direction's
    * utilisation and trains an hour */
   fullTrack: Map<EdgeId, { rho: number; tph: number }>[];
+  /** T-3542: the rows (3, 4 or 5) lines following the game's set their trains in */
+  periods: number;
+  /** T-3542: the hours lines following the game's split their day at (five, `Cuts`) */
+  hours: number[];
   save: Save;
   lineStats: Record<LineId, LineStats>;
   /** T-3333: each hidden twin's line (twin id to line id) */
@@ -341,8 +382,6 @@ export type Selection =
   | { kind: "busStop"; lines: LineId[]; stop: string }
   | { kind: "station"; station: StationId }
   | { kind: "track"; edge: EdgeId }
-  /** T-3634: two or more built pieces Shift+clicked together, for the track panel's Rebuild (game/trackSet.ts) */
-  | { kind: "tracks"; edges: EdgeId[] }
   | { kind: "junction"; node: NodeId }
   /** a train: its profile (line, run, demand level) and departure, absolute game seconds */
   | { kind: "train"; line: LineId; profile: number; dep: number }
