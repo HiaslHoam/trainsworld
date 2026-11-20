@@ -175,6 +175,58 @@ type Shown = "passenger" | "tram" | "all";
 /** line kinds the Passenger setting leaves out (map/realNetwork.ts) */
 const NOT_PASSENGER = new Set(["tram", "funicular", "monorail", "narrow_gauge"]);
 
+/** A real station for the auto-station button (map/autoStations.ts). */
+export interface RealStation {
+  lng: number;
+  lat: number;
+  /** the name the game gives it (Latin letters), or null */
+  name: string | null;
+  /** only tram, funicular, monorail or narrow gauge lines serve it */
+  light: boolean;
+}
+
+/** line id -> kind, per region (lines.json), for `light` */
+const lineKinds = new Map<string, Promise<Map<string, string> | null>>();
+function lineKindsOf(base: string, cc: string) {
+  let p = lineKinds.get(cc);
+  if (!p) {
+    p = patientFetch(`${base}data/${cc}/lines.json`)
+      .then((r) => (r.ok ? r.json() : Promise.reject(new Error(String(r.status)))))
+      .then((j: { lines: { id: string; kind?: string }[] }) => new Map(j.lines.map((l) => [l.id, l.kind ?? ""])))
+      .catch(() => null);
+    lineKinds.set(cc, p);
+  }
+  return p;
+}
+
+/** Every real station in the box (degrees: west, south, east, north), fetching the regions it touches first. */
+export async function realStationsIn(west: number, south: number, east: number, north: number): Promise<RealStation[]> {
+  // a region file covers a country or a state: the box's corners, edges' middles and centre find the ones it touches
+  const lngs = [west, (west + east) / 2, east], lats = [south, (south + north) / 2, north];
+  const found = new Map<string, string>();
+  for (const lng of lngs)
+    for (const lat of lats) {
+      const at = await regionsAt(lng, lat).catch(() => null);
+      if (at) for (const cc of at.ccs) found.set(cc, at.base);
+    }
+  const out: RealStation[] = [], seen = new Set<string>();
+  for (const [cc, base] of found) {
+    const st = await stationsOf(base, cc).catch(() => null);
+    if (!st) continue;
+    const kinds = await lineKindsOf(base, cc);
+    for (let i = 0; i < st.lng.length; i++) {
+      if (st.lng[i] < west || st.lng[i] > east || st.lat[i] < south || st.lat[i] > north) continue;
+      const key = `${st.lng[i]},${st.lat[i]}`;
+      if (seen.has(key)) continue; // a border station is in both regions' files
+      seen.add(key);
+      const ls = st.lines[i];
+      const light = !!kinds && ls.length > 0 && ls.every((l) => NOT_PASSENGER.has(kinds.get(l) ?? ""));
+      out.push({ lng: st.lng[i], lat: st.lat[i], name: st.name[i], light });
+    }
+  }
+  return out;
+}
+
 export function startRealStations(map: maplibregl.Map, overlay: Overlay) {
   /** line id -> kind, per region, read for the marks only */
   const kinds = new Map<string, Promise<Map<string, string> | null>>();

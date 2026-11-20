@@ -13,6 +13,7 @@ import { buildMode } from "../game/buildMode";
 import { linesByNum, world } from "../game/world";
 import { CAR_M, stepPlatform } from "../game/boarding";
 import { carsText } from "./inspector/schedule";
+import { addRealStations, autoStationsBusy } from "../map/autoStations";
 import { autoRamp, buildAdvanced, buildLevel, buildPlatform, buildTramPlatform, clampDesign, DESIGN_SPEEDS, designSpeed, flyoverSpeed, keepPlacing, lineDraft, quadTrack, setDoubleTrack, setQuadTrack, setSingleTrack, setTrackType, singleTrack, shade, besideOn, snapBeside, snapReal, snapRealTram, snapRoads, snapStreets, stationOnTram, stationOneTrack, TRAM_PLATFORM, tool, trackType, type TrackType } from "../game/ui";
 import { costBackground } from "../map/trackTagRows";
 import { levelTip, multText, trackMult, unitPrice, upkeepAt } from "./trackPrice";
@@ -187,6 +188,10 @@ function StationBar() {
           return undefined;
         }} />
         <PlatformTracks one={stationOneTrack.value} onPick={(one) => (stationOneTrack.value = one)} />
+        {!tram && (
+          <button class="btn" disabled={autoStationsBusy.value} data-tip={t("toolBar.autoStationsTip")} aria-label={t("toolBar.autoStationsTip")}
+            onClick={() => void addRealStations()}>{t("toolBar.autoStations")}</button>
+        )}
       </div>
     </div>
   );
