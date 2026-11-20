@@ -382,6 +382,50 @@ export function pick(ov: Overlay, px: number, py: number, trainsShown: boolean, 
   const reach = Math.max(SLOP_PX, ov.renderer.laneReachPx);
   const slop = reach * reach + 1;
 
+  // trains are not drawn zoomed far out (T-205): the train under the pointer, if there is one
+  const findTrain = (): Selection => {
+    if (!(trainsShown && !ov.renderer.trainsHidden)) return null;
+      const t = clock.now();
+      const r = ov.renderer;
+      const trips = r.trips;
+      // the selected train is drawn over the others (T-242), so it is tried first
+      const first = current?.kind === "train" ? r.tripIndex(current.profile, current.dep - r.tripsEpoch) : -1;
+      const at = pointerLocal(ov, px, py);
+      // T-724: only trips on a stretch of line near the pointer are placed (same answers)
+      const marked = at ? markNearBlocks(n, at[0], at[1], (Math.sqrt(best) + 1) * at[2] + 3 * r.laneShiftM + r.passShiftM + r.bandReach * r.bandShiftM + (BAND_M_RANGE / 2) * r.bandOn + 1) : null;
+      for (let k = r.tripCount - (first >= 0 ? 0 : 1); k >= 0; k--) {
+        const i = k === r.tripCount ? first : k;
+        if (k < r.tripCount && i === first) continue;
+        // drawn where the guard holds it (T-1965)
+        const prof = trips[i * 2], dep = trips[i * 2 + 1] + r.tripsEpoch + r.tripLag(i);
+        if (marked && !tripMayBeNear(n, marked, prof, dep, t)) continue;
+        if (hidden.lines.has(profileLine(prof))) continue; // T-3420
+        const at = tripAt(n, prof, dep, t, r.tripEnds ? r.tripEnds[i] + r.tripsEpoch : -Infinity, r.laneShiftM, r.bandShiftM, r.sampleBand, r.bandOn, r.passShiftM, r.tripBays ?? undefined, i * BAY_STRIDE);
+        if (!at || r.tripOnOffLevel(at)) continue; // T-3560
+        if (r.detailedTrains) {
+          const cars = Math.max(1, carsOf(n.lineCars?.[at.line] ?? 8));
+          for (let car = 0; car < cars; car++) {
+            const p = trainCarAt(n, at, car);
+            const [x0, y0] = ov.toScreen(...p.back), [x1, y1] = ov.toScreen(...p.front);
+            const dx = x1 - x0, dy = y1 - y0, len = Math.hypot(dx, dy) || 1;
+            const u = Math.max(0, Math.min(1, ((px - x0) * dx + (py - y0) * dy) / (len * len)));
+            const d = (x0 + u * dx - px) ** 2 + (y0 + u * dy - py) ** 2;
+            if (d < best) {
+              return { kind: "train", line: String(at.line), profile: prof, dep };
+            }
+          }
+          continue;
+        }
+        const [x, y] = ov.toScreen(at.x, at.y);
+        const d = (x - px) ** 2 + (y - py) ** 2;
+        if (d < best) {
+          return { kind: "train", line: String(at.line), profile: prof, dep };
+        }
+      }
+
+    return null;
+  };
+
   // a station wins over a train at the same spot (T-1414)
   const station=ov.renderer.stationAt(px,py,(x,y)=>ov.toScreen(x,y),SLOP_PX);
   if (station>=0) {
@@ -389,6 +433,9 @@ export function pick(ov: Overlay, px: number, py: number, trainsShown: boolean, 
     // T-3629: a click on the station already selected reaches track lying under its box that is not its own
     // platform stretch (a siding): the station would otherwise win every hit there
     if (chooseShared && current?.kind === "station" && current.station === id) {
+      // a train standing at the station: the station wins the first click (T-1414), the next one reaches the train
+      const train = findTrain();
+      if (train) return train;
       const [ti] = topSeg(ov, n.track.seg, n.track.count, px, py, slop);
       const edge = ti >= 0 ? n.track.edge[ti] : -1;
       if (edge >= 0 && !world.peek()?.edges.some((e) => e.id === edge && (String(e.a) === id || String(e.b) === id))) return { kind: "track", edge };
@@ -396,46 +443,8 @@ export function pick(ov: Overlay, px: number, py: number, trainsShown: boolean, 
     return {kind:"station",station:id};
   }
 
-  // trains are not drawn zoomed far out (T-205)
-  if (trainsShown && !ov.renderer.trainsHidden) {
-    const t = clock.now();
-    const r = ov.renderer;
-    const trips = r.trips;
-    // the selected train is drawn over the others (T-242), so it is tried first
-    const first = current?.kind === "train" ? r.tripIndex(current.profile, current.dep - r.tripsEpoch) : -1;
-    const at = pointerLocal(ov, px, py);
-    // T-724: only trips on a stretch of line near the pointer are placed (same answers)
-    const marked = at ? markNearBlocks(n, at[0], at[1], (Math.sqrt(best) + 1) * at[2] + 3 * r.laneShiftM + r.passShiftM + r.bandReach * r.bandShiftM + (BAND_M_RANGE / 2) * r.bandOn + 1) : null;
-    for (let k = r.tripCount - (first >= 0 ? 0 : 1); k >= 0; k--) {
-      const i = k === r.tripCount ? first : k;
-      if (k < r.tripCount && i === first) continue;
-      // drawn where the guard holds it (T-1965)
-      const prof = trips[i * 2], dep = trips[i * 2 + 1] + r.tripsEpoch + r.tripLag(i);
-      if (marked && !tripMayBeNear(n, marked, prof, dep, t)) continue;
-      if (hidden.lines.has(profileLine(prof))) continue; // T-3420
-      const at = tripAt(n, prof, dep, t, r.tripEnds ? r.tripEnds[i] + r.tripsEpoch : -Infinity, r.laneShiftM, r.bandShiftM, r.sampleBand, r.bandOn, r.passShiftM, r.tripBays ?? undefined, i * BAY_STRIDE);
-      if (!at || r.tripOnOffLevel(at)) continue; // T-3560
-      if (r.detailedTrains) {
-        const cars = Math.max(1, carsOf(n.lineCars?.[at.line] ?? 8));
-        for (let car = 0; car < cars; car++) {
-          const p = trainCarAt(n, at, car);
-          const [x0, y0] = ov.toScreen(...p.back), [x1, y1] = ov.toScreen(...p.front);
-          const dx = x1 - x0, dy = y1 - y0, len = Math.hypot(dx, dy) || 1;
-          const u = Math.max(0, Math.min(1, ((px - x0) * dx + (py - y0) * dy) / (len * len)));
-          const d = (x0 + u * dx - px) ** 2 + (y0 + u * dy - py) ** 2;
-          if (d < best) {
-            return { kind: "train", line: String(at.line), profile: prof, dep };
-          }
-        }
-        continue;
-      }
-      const [x, y] = ov.toScreen(at.x, at.y);
-      const d = (x - px) ** 2 + (y - py) ** 2;
-      if (d < best) {
-        return { kind: "train", line: String(at.line), profile: prof, dep };
-      }
-    }
-  }
+  const train = findTrain();
+  if (train) return train;
 
   // Height/speed views do not draw line strokes; their hidden line buffers cannot win a hit.
   // A selected line has a final highlight pass above the other line strokes; the repeat click that
